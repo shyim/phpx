@@ -1,0 +1,20 @@
+pub mod autoload;
+pub mod cache;
+pub mod config;
+pub mod downloader;
+pub mod error;
+pub mod http;
+pub mod installer;
+pub mod json;
+pub mod package;
+pub mod repository;
+pub mod solver;
+
+pub use error::{ComposerError, Result};
+pub use package::Package;
+pub use json::{ComposerJson, ComposerLock};
+pub use repository::{Repository, RepositoryManager};
+pub use solver::{Pool, Request, Solver, Policy, Transaction};
+pub use downloader::{DownloadManager, DownloadResult};
+pub use installer::{InstallationManager, InstallConfig};
+pub use autoload::{AutoloadGenerator, AutoloadConfig};

@@ -1,0 +1,13 @@
+[package]
+name = "phpx-semver"
+description = "Semantic versioning library compatible with Composer/semver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+regex = "1"
+lazy_static = "1"
+thiserror = "2"
+
+[dev-dependencies]

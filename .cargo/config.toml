@@ -1,0 +1,4 @@
+[env]
+# Force single-threaded test execution because PHP has global state
+# that cannot be safely shared between threads
+RUST_TEST_THREADS = "1"
