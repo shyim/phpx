@@ -7,8 +7,10 @@ use std::path::PathBuf;
 
 use phpx_pm::{
     autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload},
-    json::ComposerLock,
+    json::{ComposerJson, ComposerLock},
     package::Autoload,
+    plugin::PluginRegistry,
+    Package,
 };
 
 #[derive(Args, Debug)]
@@ -49,9 +51,18 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
 
     println!("{} Generating autoload files", style("Composer").green().bold());
 
+    // Load composer.json
+    let composer_json_path = working_dir.join("composer.json");
+    let composer_json: Option<ComposerJson> = if composer_json_path.exists() {
+        let content = std::fs::read_to_string(&composer_json_path)?;
+        serde_json::from_str(&content).ok()
+    } else {
+        None
+    };
+
     // Load composer.lock to get packages and content-hash for suffix
     let lock_path = working_dir.join("composer.lock");
-    let (packages, suffix) = if lock_path.exists() {
+    let (packages, suffix, installed_packages) = if lock_path.exists() {
         let content = std::fs::read_to_string(&lock_path)
             .context("Failed to read composer.lock")?;
         let lock: ComposerLock = serde_json::from_str(&content)
@@ -61,8 +72,14 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
             .map(locked_package_to_autoload)
             .collect();
 
+        // Build list of installed packages for plugin registry
+        let mut installed: Vec<Package> = lock.packages.iter()
+            .map(|lp| Package::new(&lp.name, &lp.version))
+            .collect();
+
         if !args.no_dev {
             pkgs.extend(lock.packages_dev.iter().map(locked_package_to_autoload));
+            installed.extend(lock.packages_dev.iter().map(|lp| Package::new(&lp.name, &lp.version)));
         }
 
         // Use the content-hash as the suffix
@@ -72,21 +89,15 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
             None
         };
 
-        (pkgs, suffix)
+        (pkgs, suffix, installed)
     } else {
-        (Vec::new(), None)
+        (Vec::new(), None, Vec::new())
     };
 
     // Get root autoload from composer.json
-    let composer_json_path = working_dir.join("composer.json");
-    let root_autoload: Option<Autoload> = if composer_json_path.exists() {
-        let content = std::fs::read_to_string(&composer_json_path)?;
-        let json: serde_json::Value = serde_json::from_str(&content)?;
-        json.get("autoload")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-    } else {
-        None
-    };
+    let root_autoload: Option<Autoload> = composer_json.as_ref()
+        .map(|cj| cj.autoload.clone().into())
+        .filter(|al: &Autoload| !al.is_empty());
 
     // Generate autoloader
     let config = AutoloadConfig {
@@ -101,6 +112,17 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
     let generator = AutoloadGenerator::new(config);
     generator.generate(&packages, root_autoload.as_ref())
         .context("Failed to generate autoloader")?;
+
+    // Run plugin hooks (post-autoload-dump)
+    if let Some(ref cj) = composer_json {
+        let plugin_registry = PluginRegistry::new();
+        plugin_registry.run_post_autoload_dump(
+            &vendor_dir,
+            &working_dir,
+            cj,
+            &installed_packages,
+        ).context("Failed to run plugin hooks")?;
+    }
 
     if args.optimize || args.classmap_authoritative {
         println!("{} Generated optimized autoload files",

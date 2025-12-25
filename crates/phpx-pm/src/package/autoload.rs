@@ -107,6 +107,29 @@ impl Default for AutoloadPath {
     }
 }
 
+/// Convert from json::AutoloadPath to package::AutoloadPath
+impl From<crate::json::AutoloadPath> for AutoloadPath {
+    fn from(path: crate::json::AutoloadPath) -> Self {
+        match path {
+            crate::json::AutoloadPath::Single(s) => AutoloadPath::Single(s),
+            crate::json::AutoloadPath::Multiple(v) => AutoloadPath::Multiple(v),
+        }
+    }
+}
+
+/// Convert from json::Autoload to package::Autoload
+impl From<crate::json::Autoload> for Autoload {
+    fn from(al: crate::json::Autoload) -> Self {
+        Autoload {
+            psr4: al.psr4.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            psr0: al.psr0.into_iter().map(|(k, v)| (k, v.into())).collect(),
+            classmap: al.classmap,
+            files: al.files,
+            exclude_from_classmap: al.exclude_from_classmap,
+        }
+    }
+}
+
 impl Autoload {
     /// Creates a new empty autoload configuration
     pub fn new() -> Self {

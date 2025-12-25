@@ -7,6 +7,7 @@ pub mod http;
 pub mod installer;
 pub mod json;
 pub mod package;
+pub mod plugin;
 pub mod repository;
 pub mod solver;
 
@@ -18,3 +19,4 @@ pub use solver::{Pool, Request, Solver, Policy, Transaction};
 pub use downloader::{DownloadManager, DownloadResult};
 pub use installer::{InstallationManager, InstallConfig};
 pub use autoload::{AutoloadGenerator, AutoloadConfig};
+pub use plugin::PluginRegistry;

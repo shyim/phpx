@@ -13,6 +13,7 @@ use phpx_pm::{
     http::HttpClient,
     installer::{InstallConfig, InstallationManager},
     json::{ComposerJson, ComposerLock, LockedPackage, LockSource, LockDist, LockAutoload, LockAuthor, LockFunding},
+    plugin::PluginRegistry,
     repository::{ComposerRepository, RepositoryManager},
     solver::{Pool, Policy, Request, Solver},
     Package,
@@ -357,6 +358,15 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
 
         generator.generate(&package_autoloads, root_autoload.as_ref())
             .context("Failed to generate autoloader")?;
+
+        // Run plugin hooks (post-autoload-dump)
+        let plugin_registry = PluginRegistry::new();
+        plugin_registry.run_post_autoload_dump(
+            &install_config.vendor_dir,
+            &working_dir,
+            &composer_json,
+            &packages,
+        ).context("Failed to run plugin hooks")?;
     }
 
     println!("{} {} packages updated",

@@ -1,5 +1,59 @@
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserializes a HashMap that might be represented as an empty array in JSON.
+/// Composer outputs `[]` for empty maps like stability-flags, platform-dev, etc.
+fn deserialize_map_or_empty_array<'de, D, K, V>(deserializer: D) -> Result<HashMap<K, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: Deserialize<'de> + std::hash::Hash + Eq,
+    V: Deserialize<'de>,
+{
+    use serde::de::{self, Visitor, MapAccess, SeqAccess};
+    use std::marker::PhantomData;
+
+    struct MapOrEmptyArrayVisitor<K, V> {
+        marker: PhantomData<HashMap<K, V>>,
+    }
+
+    impl<'de, K, V> Visitor<'de> for MapOrEmptyArrayVisitor<K, V>
+    where
+        K: Deserialize<'de> + std::hash::Hash + Eq,
+        V: Deserialize<'de>,
+    {
+        type Value = HashMap<K, V>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map or an empty array")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            // Only accept empty arrays
+            if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(de::Error::custom("expected empty array or map, got non-empty array"));
+            }
+            Ok(HashMap::new())
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut result = HashMap::new();
+            while let Some((key, value)) = map.next_entry()? {
+                result.insert(key, value);
+            }
+            Ok(result)
+        }
+    }
+
+    deserializer.deserialize_any(MapOrEmptyArrayVisitor {
+        marker: PhantomData,
+    })
+}
 
 /// Represents a composer.lock file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,7 +84,7 @@ pub struct ComposerLock {
     pub minimum_stability: String,
 
     /// Per-package stability flags
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub stability_flags: HashMap<String, u8>,
 
     /// Whether to prefer stable versions
@@ -42,15 +96,15 @@ pub struct ComposerLock {
     pub prefer_lowest: bool,
 
     /// Platform requirements
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub platform: HashMap<String, String>,
 
     /// Platform dev requirements
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub platform_dev: HashMap<String, String>,
 
     /// Platform overrides from config
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub platform_overrides: HashMap<String, String>,
 
     /// Plugin API version used to generate this lock file
@@ -109,27 +163,27 @@ pub struct LockedPackage {
     pub dist: Option<LockDist>,
 
     /// Required packages
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub require: HashMap<String, String>,
 
     /// Development requirements
-    #[serde(default, rename = "require-dev", skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, rename = "require-dev", skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub require_dev: HashMap<String, String>,
 
     /// Conflicts
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub conflict: HashMap<String, String>,
 
     /// Provided packages
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub provide: HashMap<String, String>,
 
     /// Replaced packages
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub replace: HashMap<String, String>,
 
     /// Suggested packages
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub suggest: HashMap<String, String>,
 
     /// Binary executables
@@ -177,7 +231,7 @@ pub struct LockedPackage {
     pub keywords: Vec<String>,
 
     /// Support information
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub support: HashMap<String, String>,
 
     /// Funding information
@@ -266,11 +320,11 @@ where
 #[serde(rename_all = "kebab-case")]
 pub struct LockAutoload {
     /// PSR-4 autoloading
-    #[serde(default, rename = "psr-4", skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, rename = "psr-4", skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub psr4: HashMap<String, serde_json::Value>,
 
     /// PSR-0 autoloading
-    #[serde(default, rename = "psr-0", skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, rename = "psr-0", skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
     pub psr0: HashMap<String, serde_json::Value>,
 
     /// Classmap files/directories
@@ -552,5 +606,60 @@ mod tests {
         assert!(lock.packages[0].abandoned_replacement().is_none());
         assert!(lock.packages[1].abandoned_replacement().is_none());
         assert_eq!(lock.packages[2].abandoned_replacement(), Some("new/package"));
+    }
+
+    #[test]
+    fn test_parse_empty_arrays_as_maps() {
+        // Composer outputs empty arrays [] instead of empty objects {} for some fields
+        let json = r#"{
+            "content-hash": "abc123",
+            "packages": [],
+            "packages-dev": [],
+            "aliases": [],
+            "minimum-stability": "stable",
+            "stability-flags": [],
+            "prefer-stable": true,
+            "prefer-lowest": false,
+            "platform": {
+                "php": ">=8.2"
+            },
+            "platform-dev": [],
+            "plugin-api-version": "2.9.0"
+        }"#;
+
+        let lock = ComposerLock::from_str(json).unwrap();
+        assert!(lock.stability_flags.is_empty());
+        assert!(lock.platform_dev.is_empty());
+        assert_eq!(lock.platform.get("php"), Some(&">=8.2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_package_with_empty_arrays() {
+        let json = r#"{
+            "content-hash": "abc123",
+            "packages": [{
+                "name": "vendor/package",
+                "version": "1.0.0",
+                "require": [],
+                "require-dev": [],
+                "conflict": [],
+                "provide": [],
+                "replace": [],
+                "suggest": [],
+                "type": "library"
+            }],
+            "packages-dev": []
+        }"#;
+
+        let lock = ComposerLock::from_str(json).unwrap();
+        assert_eq!(lock.packages.len(), 1);
+
+        let pkg = &lock.packages[0];
+        assert!(pkg.require.is_empty());
+        assert!(pkg.require_dev.is_empty());
+        assert!(pkg.conflict.is_empty());
+        assert!(pkg.provide.is_empty());
+        assert!(pkg.replace.is_empty());
+        assert!(pkg.suggest.is_empty());
     }
 }

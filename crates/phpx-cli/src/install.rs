@@ -15,6 +15,7 @@ use phpx_pm::{
     json::{ComposerJson, ComposerLock},
     Package,
     package::{Autoload, AutoloadPath, Dist, Source},
+    plugin::PluginRegistry,
 };
 
 use crate::pm::scripts;
@@ -224,6 +225,17 @@ pub async fn execute(args: InstallArgs) -> Result<i32> {
 
         generator.generate(&package_autoloads, root_autoload.as_ref())
             .context("Failed to generate autoloader")?;
+
+        // Run plugin hooks (post-autoload-dump)
+        if let Some(ref cj) = composer_json {
+            let plugin_registry = PluginRegistry::new();
+            plugin_registry.run_post_autoload_dump(
+                &install_config.vendor_dir,
+                &working_dir,
+                cj,
+                &packages,
+            ).context("Failed to run plugin hooks")?;
+        }
 
         // Run post-autoload-dump script
         if !args.no_scripts {
