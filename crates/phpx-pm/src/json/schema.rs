@@ -138,6 +138,28 @@ pub struct ComposerJson {
     pub non_feature_branches: Vec<String>,
 }
 
+impl ComposerJson {
+    /// Get branch aliases from extra.branch-alias
+    ///
+    /// Branch aliases allow packages to map development branches to semantic versions.
+    /// For example: `"dev-main": "1.0.x-dev"` makes `dev-main` appear as `1.0.x-dev`.
+    ///
+    /// Returns a map of source version to (alias_normalized, alias_pretty)
+    pub fn get_branch_aliases(&self) -> std::collections::HashMap<String, (String, String)> {
+        crate::package::parse_branch_aliases(Some(&self.extra))
+    }
+
+    /// Get inline alias from a require constraint if present
+    ///
+    /// Composer allows specifying aliases inline in require constraints using "as":
+    /// `"vendor/package": "dev-main as 1.0.0"`
+    ///
+    /// Returns `Some((actual_constraint, alias_version))` if an alias is present
+    pub fn get_inline_alias(constraint: &str) -> Option<(String, String)> {
+        crate::package::parse_inline_alias(constraint)
+    }
+}
+
 fn default_type() -> String {
     "library".to_string()
 }

@@ -3,15 +3,19 @@
 // This module provides structs and types for representing Composer packages,
 // including dependencies, autoload configuration, source/dist information, etc.
 
+mod alias;
 mod autoload;
 mod link;
 mod package;
 mod source;
 
+pub use alias::{
+    parse_branch_aliases, parse_inline_alias, AliasPackage, DEFAULT_BRANCH_ALIAS,
+};
 pub use autoload::{Autoload, AutoloadPath};
 pub use link::{Link, LinkType};
 pub use package::{
-    Abandoned, ArchiveConfig, Author, Funding, Package, ScriptHandler, Scripts, Stability,
-    Support,
+    package_type, Abandoned, ArchiveConfig, Author, Funding, Package, ScriptHandler, Scripts,
+    Stability, Support,
 };
 pub use source::{Dist, Mirror, Source};

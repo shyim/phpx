@@ -112,6 +112,13 @@ pub struct PackageAutoload {
     pub provides: HashMap<String, String>,
 }
 
+impl PackageAutoload {
+    /// Returns true if this is a metapackage (no files, only dependencies)
+    pub fn is_metapackage(&self) -> bool {
+        self.package_type == crate::package::package_type::METAPACKAGE
+    }
+}
+
 impl Default for PackageAutoload {
     fn default() -> Self {
         Self {
@@ -253,7 +260,11 @@ impl AutoloadGenerator {
         let mut files: Vec<(String, String)> = Vec::new();
 
         // Process package autoloads in sorted order (dependencies first)
+        // Skip metapackages as they have no files to autoload
         for pkg in &sorted_packages {
+            if pkg.is_metapackage() {
+                continue;
+            }
             self.process_autoload(&pkg.autoload, &pkg.install_path, &pkg.name, &mut psr4, &mut psr0, &mut classmap, &mut files, &exclude_patterns)?;
         }
 
@@ -920,12 +931,19 @@ if ($issues) {
 
         // Add all installed packages to versions
         for pkg in packages {
+            // Metapackages have no install path (they have no files)
+            let install_path = if pkg.is_metapackage() {
+                None
+            } else {
+                Some(format!("__DIR__ . '/../{}'", pkg.install_path))
+            };
+
             let entry = PackageVersionEntry {
                 pretty_version: pkg.pretty_version.clone(),
                 version: pkg.version.clone(),
                 reference: pkg.reference.clone(),
                 package_type: Some(pkg.package_type.clone()),
-                install_path: Some(format!("__DIR__ . '/../{}'", pkg.install_path)),
+                install_path,
                 aliases: pkg.aliases.clone(),
                 dev_requirement: pkg.dev_requirement,
                 replaced: Vec::new(),

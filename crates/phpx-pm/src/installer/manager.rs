@@ -11,6 +11,7 @@ use crate::Result;
 
 use super::binary::BinaryInstaller;
 use super::library::LibraryInstaller;
+use super::metapackage::MetapackageInstaller;
 
 /// Installation configuration
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ impl Default for InstallConfig {
 pub struct InstallationManager {
     library_installer: LibraryInstaller,
     binary_installer: BinaryInstaller,
+    metapackage_installer: MetapackageInstaller,
     config: InstallConfig,
 }
 
@@ -89,9 +91,12 @@ impl InstallationManager {
             config.vendor_dir.clone(),
         );
 
+        let metapackage_installer = MetapackageInstaller::new();
+
         Self {
             library_installer,
             binary_installer,
+            metapackage_installer,
             config,
         }
     }
@@ -132,9 +137,17 @@ impl InstallationManager {
             match op {
                 Operation::Install(pkg) => {
                     // Skip platform packages (php, ext-*)
-                    if pkg.name == "php" || pkg.name.starts_with("ext-") {
+                    if pkg.is_platform_package() {
                         continue;
                     }
+
+                    // Handle metapackages specially - they have no files
+                    if pkg.is_metapackage() {
+                        self.metapackage_installer.install(pkg).await?;
+                        result.installed.push(pkg.as_ref().clone());
+                        continue;
+                    }
+
                     let installed = self.install_package(pkg).await?;
                     if installed {
                         let bins = self.binary_installer.install(pkg).await?;
@@ -144,9 +157,31 @@ impl InstallationManager {
                 }
                 Operation::Update { from, to } => {
                     // Skip platform packages
-                    if to.name == "php" || to.name.starts_with("ext-") {
+                    if to.is_platform_package() {
                         continue;
                     }
+
+                    // Handle metapackage updates
+                    if to.is_metapackage() {
+                        // If upgrading from a regular package to metapackage, remove old files
+                        if !from.is_metapackage() {
+                            self.binary_installer.uninstall(from).await?;
+                            self.uninstall_package(from).await?;
+                        }
+                        self.metapackage_installer.update(from, to).await?;
+                        result.updated.push((from.as_ref().clone(), to.as_ref().clone()));
+                        continue;
+                    }
+
+                    // If downgrading from metapackage to regular, just install
+                    if from.is_metapackage() {
+                        self.install_package(to).await?;
+                        let bins = self.binary_installer.install(to).await?;
+                        result.binaries.extend(bins);
+                        result.updated.push((from.as_ref().clone(), to.as_ref().clone()));
+                        continue;
+                    }
+
                     self.update_package(from, to).await?;
                     self.binary_installer.uninstall(from).await?;
                     let bins = self.binary_installer.install(to).await?;
@@ -155,9 +190,17 @@ impl InstallationManager {
                 }
                 Operation::Uninstall(pkg) => {
                     // Skip platform packages
-                    if pkg.name == "php" || pkg.name.starts_with("ext-") {
+                    if pkg.is_platform_package() {
                         continue;
                     }
+
+                    // Metapackages have no files to remove
+                    if pkg.is_metapackage() {
+                        self.metapackage_installer.uninstall(pkg).await?;
+                        result.removed.push(pkg.as_ref().clone());
+                        continue;
+                    }
+
                     self.binary_installer.uninstall(pkg).await?;
                     self.uninstall_package(pkg).await?;
                     result.removed.push(pkg.as_ref().clone());
@@ -205,6 +248,18 @@ impl InstallationManager {
         tokio::fs::create_dir_all(&self.config.vendor_dir).await?;
 
         for package in packages {
+            // Skip platform packages
+            if package.is_platform_package() {
+                continue;
+            }
+
+            // Handle metapackages
+            if package.is_metapackage() {
+                self.metapackage_installer.install(package).await?;
+                result.installed.push(package.clone());
+                continue;
+            }
+
             self.install_package(package).await?;
             let bins = self.binary_installer.install(package).await?;
             result.binaries.extend(bins);

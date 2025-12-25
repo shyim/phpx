@@ -180,4 +180,37 @@ mod tests {
         json.name = Some("InvalidName".to_string());
         assert!(validate_composer_json(&json).is_err());
     }
+
+    #[test]
+    fn test_branch_aliases() {
+        let json = r#"{
+            "name": "vendor/package",
+            "extra": {
+                "branch-alias": {
+                    "dev-main": "1.0.x-dev",
+                    "dev-2.x": "2.0.x-dev"
+                }
+            }
+        }"#;
+
+        let result = parse_composer_json(json).unwrap();
+        let aliases = result.get_branch_aliases();
+
+        // Should have parsed branch aliases
+        assert!(!aliases.is_empty());
+    }
+
+    #[test]
+    fn test_inline_alias() {
+        // Test inline alias parsing from ComposerJson helper
+        let result = ComposerJson::get_inline_alias("dev-main as 1.0.0");
+        assert!(result.is_some());
+        let (actual, alias) = result.unwrap();
+        assert_eq!(actual, "dev-main");
+        assert_eq!(alias, "1.0.0");
+
+        // Test regular constraint (no alias)
+        let result = ComposerJson::get_inline_alias("^1.0");
+        assert!(result.is_none());
+    }
 }

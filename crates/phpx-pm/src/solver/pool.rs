@@ -2,19 +2,88 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::cell::RefCell;
 
-use crate::package::Package;
+use crate::package::{AliasPackage, Package};
 use phpx_semver::{Constraint, ConstraintInterface, Operator, VersionParser};
 
 /// A literal represents a package decision in the SAT solver.
 /// Positive literals mean "install package", negative means "don't install".
 pub type PackageId = i32;
 
+/// Represents an entry in the pool - either a regular package or an alias
+#[derive(Debug, Clone)]
+pub enum PoolEntry {
+    /// A regular package
+    Package(Arc<Package>),
+    /// An alias of another package
+    Alias(Arc<AliasPackage>),
+}
+
+impl PoolEntry {
+    /// Returns the package name
+    pub fn name(&self) -> &str {
+        match self {
+            PoolEntry::Package(p) => p.name(),
+            PoolEntry::Alias(a) => a.name(),
+        }
+    }
+
+    /// Returns the version string
+    pub fn version(&self) -> &str {
+        match self {
+            PoolEntry::Package(p) => p.version(),
+            PoolEntry::Alias(a) => a.version(),
+        }
+    }
+
+    /// Returns the pretty version string
+    pub fn pretty_version(&self) -> &str {
+        match self {
+            PoolEntry::Package(p) => p.pretty_version(),
+            PoolEntry::Alias(a) => a.pretty_version(),
+        }
+    }
+
+    /// Returns true if this is an alias package
+    pub fn is_alias(&self) -> bool {
+        matches!(self, PoolEntry::Alias(_))
+    }
+
+    /// Returns the underlying package if this is a Package entry
+    /// For aliases, returns None - use as_alias() instead
+    pub fn get_package(&self) -> Option<&Arc<Package>> {
+        match self {
+            PoolEntry::Package(p) => Some(p),
+            PoolEntry::Alias(_) => None,
+        }
+    }
+
+    /// Returns the alias package if this is an alias
+    pub fn as_alias(&self) -> Option<&Arc<AliasPackage>> {
+        match self {
+            PoolEntry::Alias(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    /// Returns the regular package if this is not an alias
+    pub fn as_package(&self) -> Option<&Arc<Package>> {
+        match self {
+            PoolEntry::Package(p) => Some(p),
+            _ => None,
+        }
+    }
+}
+
 /// Pool of all available packages for dependency resolution.
 ///
 /// The pool indexes packages by ID (1-based) and by name for efficient lookup.
 /// Each package version gets a unique ID that's used as literals in SAT clauses.
 pub struct Pool {
-    /// All packages indexed by ID (1-based, so index 0 is unused)
+    /// All entries indexed by ID (1-based, so index 0 is unused)
+    entries: Vec<PoolEntry>,
+
+    /// Legacy: All packages indexed by ID (1-based, so index 0 is unused)
+    /// TODO: Remove this once all code uses entries
     packages: Vec<Arc<Package>>,
 
     /// Package IDs indexed by name (lowercase)
@@ -34,16 +103,20 @@ pub struct Pool {
 
     /// Cached parsed constraints (constraint string -> parsed constraint)
     parsed_constraints: RefCell<HashMap<String, Option<Box<dyn ConstraintInterface>>>>,
+
+    /// Maps alias package IDs to their base package IDs
+    alias_map: HashMap<PackageId, PackageId>,
 }
 
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pool")
-            .field("packages", &self.packages)
+            .field("entries", &self.entries)
             .field("packages_by_name", &self.packages_by_name)
             .field("providers", &self.providers)
             .field("priorities", &self.priorities)
             .field("package_repos", &self.package_repos)
+            .field("alias_map", &self.alias_map)
             .finish()
     }
 }
@@ -51,14 +124,17 @@ impl std::fmt::Debug for Pool {
 impl Pool {
     /// Create a new empty pool
     pub fn new() -> Self {
+        let placeholder = Arc::new(Package::new("__placeholder__", "0.0.0"));
         Self {
-            packages: vec![Arc::new(Package::new("__placeholder__", "0.0.0"))], // Index 0 placeholder
+            entries: vec![PoolEntry::Package(Arc::clone(&placeholder))], // Index 0 placeholder
+            packages: vec![placeholder], // Index 0 placeholder
             packages_by_name: HashMap::new(),
             providers: HashMap::new(),
             priorities: HashMap::new(),
             package_repos: HashMap::new(),
             normalized_versions: RefCell::new(HashMap::new()),
             parsed_constraints: RefCell::new(HashMap::new()),
+            alias_map: HashMap::new(),
         }
     }
 
@@ -104,8 +180,107 @@ impl Pool {
             self.package_repos.insert(id, repo.to_string());
         }
 
-        self.packages.push(Arc::new(package));
+        let pkg_arc = Arc::new(package);
+        self.entries.push(PoolEntry::Package(Arc::clone(&pkg_arc)));
+        self.packages.push(pkg_arc);
         id
+    }
+
+    /// Add an alias package to the pool, returning its ID
+    ///
+    /// This creates a new pool entry for the alias that references the base package.
+    /// The alias will have its own ID but share the underlying package data.
+    pub fn add_alias(&mut self, alias: AliasPackage) -> PackageId {
+        let id = self.entries.len() as PackageId;
+        let name = alias.name().to_lowercase();
+
+        // Index by name (so the alias version can be found)
+        self.packages_by_name
+            .entry(name.clone())
+            .or_default()
+            .push(id);
+
+        // Index by provides (aliases may have transformed provides)
+        for (provided, _constraint) in alias.provide() {
+            self.providers
+                .entry(provided.to_lowercase())
+                .or_default()
+                .push(id);
+        }
+
+        // Index by replaces
+        for (replaced, _constraint) in alias.replace() {
+            self.providers
+                .entry(replaced.to_lowercase())
+                .or_default()
+                .push(id);
+        }
+
+        // Find the base package ID
+        let base_pkg = alias.alias_of();
+        let base_id = self.find_package_id(base_pkg.name(), base_pkg.version());
+
+        let alias_arc = Arc::new(alias);
+        self.entries.push(PoolEntry::Alias(alias_arc));
+
+        // Also add a placeholder to packages to keep indices in sync
+        // (This is a temporary measure until we fully migrate away from packages vec)
+        self.packages.push(Arc::new(Package::new("__alias_placeholder__", "0.0.0")));
+
+        // Track alias relationship
+        if let Some(base_id) = base_id {
+            self.alias_map.insert(id, base_id);
+        }
+
+        id
+    }
+
+    /// Find a package ID by name and version
+    fn find_package_id(&self, name: &str, version: &str) -> Option<PackageId> {
+        let name_lower = name.to_lowercase();
+        if let Some(ids) = self.packages_by_name.get(&name_lower) {
+            for &id in ids {
+                if let Some(entry) = self.entry(id) {
+                    if entry.version() == version {
+                        return Some(id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get an entry by its ID
+    pub fn entry(&self, id: PackageId) -> Option<&PoolEntry> {
+        if id > 0 && (id as usize) < self.entries.len() {
+            Some(&self.entries[id as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Check if a package ID represents an alias
+    pub fn is_alias(&self, id: PackageId) -> bool {
+        self.entry(id).map(|e| e.is_alias()).unwrap_or(false)
+    }
+
+    /// Get the base package ID for an alias
+    pub fn get_alias_base(&self, id: PackageId) -> Option<PackageId> {
+        self.alias_map.get(&id).copied()
+    }
+
+    /// Get all aliases for a package
+    pub fn get_aliases(&self, base_id: PackageId) -> Vec<PackageId> {
+        self.alias_map
+            .iter()
+            .filter_map(|(&alias_id, &base)| {
+                if base == base_id {
+                    Some(alias_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Get a package by its ID
@@ -143,21 +318,46 @@ impl Pool {
         if let Some(ids) = self.providers.get(&name_lower) {
             for &id in ids {
                 // Check if the provider constraint matches
-                if let Some(pkg) = self.package(id) {
-                    // Look up the provided/replaced version (case-insensitive)
-                    let provides_version = pkg.provide.iter()
+                // Handle both regular packages and alias packages
+                let provides_version = if let Some(entry) = self.entry(id) {
+                    match entry {
+                        PoolEntry::Package(pkg) => {
+                            pkg.provide.iter()
+                                .find(|(k, _)| k.to_lowercase() == name_lower)
+                                .map(|(_, v)| v.clone())
+                                .or_else(|| {
+                                    pkg.replace.iter()
+                                        .find(|(k, _)| k.to_lowercase() == name_lower)
+                                        .map(|(_, v)| v.clone())
+                                })
+                        }
+                        PoolEntry::Alias(alias) => {
+                            alias.provide().iter()
+                                .find(|(k, _)| k.to_lowercase() == name_lower)
+                                .map(|(_, v)| v.clone())
+                                .or_else(|| {
+                                    alias.replace().iter()
+                                        .find(|(k, _)| k.to_lowercase() == name_lower)
+                                        .map(|(_, v)| v.clone())
+                                })
+                        }
+                    }
+                } else if let Some(pkg) = self.package(id) {
+                    pkg.provide.iter()
                         .find(|(k, _)| k.to_lowercase() == name_lower)
-                        .map(|(_, v)| v)
+                        .map(|(_, v)| v.clone())
                         .or_else(|| {
                             pkg.replace.iter()
                                 .find(|(k, _)| k.to_lowercase() == name_lower)
-                                .map(|(_, v)| v)
-                        });
+                                .map(|(_, v)| v.clone())
+                        })
+                } else {
+                    None
+                };
 
-                    if let Some(provided_version) = provides_version {
-                        if self.matches_provided_constraint(provided_version, constraint) {
-                            result.push(id);
-                        }
+                if let Some(provided_version) = provides_version {
+                    if self.matches_provided_constraint(&provided_version, constraint) {
+                        result.push(id);
                     }
                 }
             }
@@ -252,7 +452,12 @@ impl Pool {
             return true;
         }
 
-        let Some(package) = self.package(id) else {
+        // Get the version from either package or alias entry
+        let version = if let Some(entry) = self.entry(id) {
+            entry.version().to_string()
+        } else if let Some(package) = self.package(id) {
+            package.version.clone()
+        } else {
             return false;
         };
 
@@ -264,9 +469,9 @@ impl Pool {
             } else {
                 drop(cache);
                 let parser = VersionParser::new();
-                let v = match parser.normalize(&package.version) {
+                let v = match parser.normalize(&version) {
                     Ok(v) => v,
-                    Err(_) => package.version.clone(),
+                    Err(_) => version.clone(),
                 };
                 self.normalized_versions.borrow_mut().insert(id, v.clone());
                 v
@@ -624,5 +829,115 @@ mod tests {
         // Should not match if constraint doesn't match replace version
         let matches = pool.what_provides("symfony/polyfill-php73", Some("^2.0"));
         assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_pool_add_alias() {
+        let mut pool = Pool::new();
+
+        // Add base package
+        let base_pkg = Package::new("vendor/package", "dev-main");
+        let base_id = pool.add_package(base_pkg.clone());
+
+        // Add alias for the dev-main version
+        let alias = AliasPackage::new(
+            Arc::new(base_pkg),
+            "1.0.0.0".to_string(),
+            "1.0.0".to_string(),
+        );
+        let alias_id = pool.add_alias(alias);
+
+        // Verify alias was added
+        assert!(alias_id > base_id);
+        assert!(pool.is_alias(alias_id));
+        assert!(!pool.is_alias(base_id));
+
+        // Verify alias relationship
+        assert_eq!(pool.get_alias_base(alias_id), Some(base_id));
+        assert_eq!(pool.get_aliases(base_id), vec![alias_id]);
+    }
+
+    #[test]
+    fn test_pool_alias_what_provides() {
+        let mut pool = Pool::new();
+
+        // Add base package with dev version
+        let base_pkg = Package::new("vendor/package", "dev-main");
+        pool.add_package(base_pkg.clone());
+
+        // Add alias that makes dev-main appear as 1.0.0
+        let alias = AliasPackage::new(
+            Arc::new(base_pkg),
+            "1.0.0.0".to_string(),
+            "1.0.0".to_string(),
+        );
+        pool.add_alias(alias);
+
+        // Should find both dev-main and the 1.0.0 alias
+        let all_versions = pool.packages_by_name("vendor/package");
+        assert_eq!(all_versions.len(), 2);
+
+        // Constraint ^1.0 should match the alias
+        let matches = pool.what_provides("vendor/package", Some("^1.0"));
+        assert_eq!(matches.len(), 1);
+
+        // Constraint dev-main should match the base package
+        let matches = pool.what_provides("vendor/package", Some("dev-main"));
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_pool_entry_types() {
+        let mut pool = Pool::new();
+
+        // Add a regular package
+        let pkg = Package::new("vendor/package", "1.0.0");
+        let pkg_id = pool.add_package(pkg.clone());
+
+        // Add an alias
+        let alias = AliasPackage::new(
+            Arc::new(pkg),
+            "1.0.x-dev".to_string(),
+            "1.0.x-dev".to_string(),
+        );
+        let alias_id = pool.add_alias(alias);
+
+        // Verify entry types
+        let pkg_entry = pool.entry(pkg_id).unwrap();
+        assert!(!pkg_entry.is_alias());
+        assert!(pkg_entry.as_package().is_some());
+        assert!(pkg_entry.as_alias().is_none());
+
+        let alias_entry = pool.entry(alias_id).unwrap();
+        assert!(alias_entry.is_alias());
+        assert!(alias_entry.as_alias().is_some());
+        assert!(alias_entry.get_package().is_none());
+    }
+
+    #[test]
+    fn test_pool_entry_version() {
+        let mut pool = Pool::new();
+
+        // Add base package
+        let base_pkg = Package::new("vendor/package", "dev-main");
+        let base_id = pool.add_package(base_pkg.clone());
+
+        // Add alias
+        let alias = AliasPackage::new(
+            Arc::new(base_pkg),
+            "2.0.0.0".to_string(),
+            "2.0.0".to_string(),
+        );
+        let alias_id = pool.add_alias(alias);
+
+        // Verify versions through entries
+        let base_entry = pool.entry(base_id).unwrap();
+        assert_eq!(base_entry.version(), "dev-main");
+        assert_eq!(base_entry.name(), "vendor/package");
+
+        let alias_entry = pool.entry(alias_id).unwrap();
+        assert_eq!(alias_entry.version(), "2.0.0.0");
+        assert_eq!(alias_entry.pretty_version(), "2.0.0");
+        assert_eq!(alias_entry.name(), "vendor/package");
     }
 }

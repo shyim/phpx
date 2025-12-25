@@ -56,7 +56,7 @@ mod policy;
 #[cfg(test)]
 mod tests;
 
-pub use pool::{Pool, PoolBuilder};
+pub use pool::{Pool, PoolBuilder, PoolEntry, PackageId};
 pub use request::Request;
 pub use rule::{Rule, RuleType, Literal};
 pub use rule_set::RuleSet;

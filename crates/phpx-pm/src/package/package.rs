@@ -329,6 +329,18 @@ fn default_package_type() -> String {
     "library".to_string()
 }
 
+/// Package type constants
+pub mod package_type {
+    /// Standard library package (default)
+    pub const LIBRARY: &str = "library";
+    /// Project package (not meant to be a dependency)
+    pub const PROJECT: &str = "project";
+    /// Metapackage - no code, only dependencies
+    pub const METAPACKAGE: &str = "metapackage";
+    /// Composer plugin
+    pub const COMPOSER_PLUGIN: &str = "composer-plugin";
+}
+
 impl Package {
     /// Creates a new package with minimal required fields
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
@@ -398,6 +410,26 @@ impl Package {
     /// Returns the package type
     pub fn package_type(&self) -> &str {
         &self.package_type
+    }
+
+    /// Returns true if this is a metapackage (no files, only dependencies)
+    pub fn is_metapackage(&self) -> bool {
+        self.package_type == package_type::METAPACKAGE
+    }
+
+    /// Returns true if this is a composer plugin
+    pub fn is_composer_plugin(&self) -> bool {
+        self.package_type == package_type::COMPOSER_PLUGIN
+    }
+
+    /// Returns true if this is a platform package (php, ext-*, lib-*)
+    pub fn is_platform_package(&self) -> bool {
+        self.name == "php"
+            || self.name.starts_with("ext-")
+            || self.name.starts_with("lib-")
+            || self.name == "composer"
+            || self.name == "composer-runtime-api"
+            || self.name == "composer-plugin-api"
     }
 
     /// Returns the stability
