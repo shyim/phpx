@@ -23,12 +23,13 @@ use globset::{Glob, GlobSetBuilder};
 #[command(about = "PHP CLI embedded in Rust")]
 #[command(disable_version_flag = true)]
 #[command(after_help = "See 'php --help' for the original PHP CLI help.")]
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
 
     /// Run PHP code directly (like php -r)
-    #[arg(short = 'r', value_name = "CODE", conflicts_with_all = ["script", "lint", "info", "modules", "version_flag"])]
+    #[arg(short = 'r', value_name = "CODE", conflicts_with_all = ["script_and_args", "lint", "info", "modules", "version_flag"])]
     run: Option<String>,
 
     /// Syntax check only (lint)
@@ -36,28 +37,24 @@ struct Args {
     lint: bool,
 
     /// PHP information (phpinfo)
-    #[arg(short = 'i', long = "info", conflicts_with_all = ["script", "run", "lint", "modules", "version_flag"])]
+    #[arg(short = 'i', long = "info", conflicts_with_all = ["script_and_args", "run", "lint", "modules", "version_flag"])]
     info: bool,
 
     /// Show compiled in modules
-    #[arg(short = 'm', long = "modules", conflicts_with_all = ["script", "run", "lint", "info", "version_flag"])]
+    #[arg(short = 'm', long = "modules", conflicts_with_all = ["script_and_args", "run", "lint", "info", "version_flag"])]
     modules: bool,
 
     /// Version information
-    #[arg(short = 'v', long = "version", conflicts_with_all = ["script", "run", "lint", "info", "modules"])]
+    #[arg(short = 'v', long = "version", conflicts_with_all = ["script_and_args", "run", "lint", "info", "modules"])]
     version_flag: bool,
 
     /// Define INI entry (can be used multiple times)
     #[arg(short = 'd', value_name = "KEY=VALUE", action = clap::ArgAction::Append)]
     define: Vec<String>,
 
-    /// PHP script to execute
-    #[arg(value_name = "FILE")]
-    script: Option<PathBuf>,
-
-    /// Arguments passed to script
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
+    /// PHP script to execute and its arguments
+    #[arg(value_name = "FILE", trailing_var_arg = true, allow_hyphen_values = true)]
+    script_and_args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -641,10 +638,19 @@ fn run() -> Result<i32> {
         return Ok(Php::print_modules()?);
     }
 
+    // Parse script and args from combined vector
+    let (script, script_args): (Option<PathBuf>, Vec<String>) = if args.script_and_args.is_empty() {
+        (None, Vec::new())
+    } else {
+        let script = PathBuf::from(&args.script_and_args[0]);
+        let script_args = args.script_and_args[1..].to_vec();
+        (Some(script), script_args)
+    };
+
     // Handle -l/--lint
     if args.lint {
-        if let Some(script) = &args.script {
-            let path = script.to_string_lossy();
+        if let Some(ref s) = script {
+            let path = s.to_string_lossy();
             return Ok(Php::lint(path.as_ref())?);
         } else {
             eprintln!("No input file specified for syntax check");
@@ -654,13 +660,13 @@ fn run() -> Result<i32> {
 
     // Handle -r (run code)
     if let Some(code) = &args.run {
-        return Ok(Php::execute_code(code, &args.args)?);
+        return Ok(Php::execute_code(code, &script_args)?);
     }
 
     // Handle script execution
-    if let Some(script) = &args.script {
-        let script_path = script.to_string_lossy();
-        return Ok(Php::execute_script(script_path.as_ref(), &args.args)?);
+    if let Some(ref s) = script {
+        let script_path = s.to_string_lossy();
+        return Ok(Php::execute_script(script_path.as_ref(), &script_args)?);
     }
 
     // No action specified - show usage
