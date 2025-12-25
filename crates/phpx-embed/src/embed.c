@@ -320,6 +320,103 @@ const char *phpx_get_zend_version(void) {
 }
 
 /*
+ * Check if PHP is built with debug mode.
+ */
+int phpx_is_debug(void) {
+#ifdef ZEND_DEBUG
+    return ZEND_DEBUG;
+#else
+    return 0;
+#endif
+}
+
+/*
+ * Check if PHP is built with ZTS (thread safety).
+ */
+int phpx_is_zts(void) {
+#ifdef ZTS
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/*
+ * Get ICU version (from intl extension).
+ * Returns NULL if not available.
+ */
+const char *phpx_get_icu_version(void) {
+#ifdef U_ICU_VERSION
+    return U_ICU_VERSION;
+#else
+    return NULL;
+#endif
+}
+
+/*
+ * Get libxml version.
+ */
+const char *phpx_get_libxml_version(void) {
+#ifdef LIBXML_DOTTED_VERSION
+    return LIBXML_DOTTED_VERSION;
+#else
+    return NULL;
+#endif
+}
+
+/*
+ * Get OpenSSL version text.
+ */
+const char *phpx_get_openssl_version(void) {
+#ifdef OPENSSL_VERSION_TEXT
+    return OPENSSL_VERSION_TEXT;
+#else
+    return NULL;
+#endif
+}
+
+/*
+ * Get PCRE version.
+ */
+const char *phpx_get_pcre_version(void) {
+#ifdef PCRE2_MAJOR
+    /* PCRE2 - construct version string */
+    static char pcre_version[32];
+    snprintf(pcre_version, sizeof(pcre_version), "%d.%d", PCRE2_MAJOR, PCRE2_MINOR);
+    return pcre_version;
+#elif defined(PCRE_MAJOR)
+    /* PCRE1 */
+    static char pcre_version[32];
+    snprintf(pcre_version, sizeof(pcre_version), "%d.%d", PCRE_MAJOR, PCRE_MINOR);
+    return pcre_version;
+#else
+    return NULL;
+#endif
+}
+
+/*
+ * Get zlib version.
+ */
+const char *phpx_get_zlib_version(void) {
+#ifdef ZLIB_VERSION
+    return ZLIB_VERSION;
+#else
+    return NULL;
+#endif
+}
+
+/*
+ * Get curl version.
+ */
+const char *phpx_get_curl_version(void) {
+#ifdef LIBCURL_VERSION
+    return LIBCURL_VERSION;
+#else
+    return NULL;
+#endif
+}
+
+/*
  * Get loaded extension names as a newline-separated string.
  * Caller must free the returned string.
  */

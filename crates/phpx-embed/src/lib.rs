@@ -73,6 +73,16 @@ extern "C" {
     fn phpx_get_zend_version() -> *const c_char;
     fn phpx_get_loaded_extensions(argc: c_int, argv: *mut *mut c_char) -> *mut c_char;
     fn phpx_free_string(s: *mut c_char);
+
+    // Build-time platform info
+    fn phpx_is_debug() -> c_int;
+    fn phpx_is_zts() -> c_int;
+    fn phpx_get_icu_version() -> *const c_char;
+    fn phpx_get_libxml_version() -> *const c_char;
+    fn phpx_get_openssl_version() -> *const c_char;
+    fn phpx_get_pcre_version() -> *const c_char;
+    fn phpx_get_zlib_version() -> *const c_char;
+    fn phpx_get_curl_version() -> *const c_char;
 }
 
 // FFI bindings to our C code - Web mode
@@ -322,6 +332,88 @@ impl Php {
         };
 
         Ok(result)
+    }
+
+    /// Check if PHP was built with debug mode
+    pub fn is_debug() -> bool {
+        unsafe { phpx_is_debug() != 0 }
+    }
+
+    /// Check if PHP was built with ZTS (thread safety)
+    pub fn is_zts() -> bool {
+        unsafe { phpx_is_zts() != 0 }
+    }
+
+    /// Get ICU library version (from intl extension)
+    pub fn icu_version() -> Option<&'static str> {
+        unsafe {
+            let ptr = phpx_get_icu_version();
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_str().unwrap_or(""))
+            }
+        }
+    }
+
+    /// Get libxml version
+    pub fn libxml_version() -> Option<&'static str> {
+        unsafe {
+            let ptr = phpx_get_libxml_version();
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_str().unwrap_or(""))
+            }
+        }
+    }
+
+    /// Get OpenSSL version text
+    pub fn openssl_version() -> Option<&'static str> {
+        unsafe {
+            let ptr = phpx_get_openssl_version();
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_str().unwrap_or(""))
+            }
+        }
+    }
+
+    /// Get PCRE version
+    pub fn pcre_version() -> Option<&'static str> {
+        unsafe {
+            let ptr = phpx_get_pcre_version();
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_str().unwrap_or(""))
+            }
+        }
+    }
+
+    /// Get zlib version
+    pub fn zlib_version() -> Option<&'static str> {
+        unsafe {
+            let ptr = phpx_get_zlib_version();
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_str().unwrap_or(""))
+            }
+        }
+    }
+
+    /// Get curl version
+    pub fn curl_version() -> Option<&'static str> {
+        unsafe {
+            let ptr = phpx_get_curl_version();
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_str().unwrap_or(""))
+            }
+        }
     }
 }
 

@@ -32,6 +32,51 @@ const char *phpx_get_version(void);
  */
 int phpx_get_version_id(void);
 
+/*
+ * Get Zend Engine version string.
+ */
+const char *phpx_get_zend_version(void);
+
+/*
+ * Check if PHP is built with debug mode.
+ */
+int phpx_is_debug(void);
+
+/*
+ * Check if PHP is built with ZTS (thread safety).
+ */
+int phpx_is_zts(void);
+
+/*
+ * Get ICU version (from intl extension). Returns NULL if not available.
+ */
+const char *phpx_get_icu_version(void);
+
+/*
+ * Get libxml version. Returns NULL if not available.
+ */
+const char *phpx_get_libxml_version(void);
+
+/*
+ * Get OpenSSL version text. Returns NULL if not available.
+ */
+const char *phpx_get_openssl_version(void);
+
+/*
+ * Get PCRE version. Returns NULL if not available.
+ */
+const char *phpx_get_pcre_version(void);
+
+/*
+ * Get zlib version. Returns NULL if not available.
+ */
+const char *phpx_get_zlib_version(void);
+
+/*
+ * Get curl version. Returns NULL if not available.
+ */
+const char *phpx_get_curl_version(void);
+
 #ifdef __cplusplus
 }
 #endif
