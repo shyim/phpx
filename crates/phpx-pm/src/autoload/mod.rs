@@ -6,5 +6,5 @@
 mod generator;
 mod classmap;
 
-pub use generator::{AutoloadGenerator, AutoloadConfig, PackageAutoload};
+pub use generator::{AutoloadGenerator, AutoloadConfig, PackageAutoload, RootPackageInfo};
 pub use classmap::ClassMapGenerator;

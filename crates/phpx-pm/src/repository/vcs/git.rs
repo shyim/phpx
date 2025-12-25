@@ -293,6 +293,22 @@ impl VcsDriver for GitDriver {
     }
 }
 
+/// Get the current git commit hash (HEAD) for a directory.
+/// Returns None if the directory is not a git repository or if git is not available.
+pub fn get_head_commit(path: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

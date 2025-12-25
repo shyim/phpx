@@ -15,7 +15,7 @@ mod bitbucket;
 mod repository;
 
 pub use driver::{VcsDriver, VcsDriverError, VcsInfo};
-pub use git::GitDriver;
+pub use git::{GitDriver, get_head_commit};
 pub use github::GitHubDriver;
 pub use gitlab::GitLabDriver;
 pub use bitbucket::BitbucketDriver;

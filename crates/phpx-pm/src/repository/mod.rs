@@ -16,4 +16,4 @@ pub use installed::*;
 pub use path::*;
 pub use package::*;
 pub use artifact::*;
-pub use vcs::{VcsRepository, VcsType, GitDriver, GitHubDriver, GitLabDriver, BitbucketDriver};
+pub use vcs::{VcsRepository, VcsType, GitDriver, GitHubDriver, GitLabDriver, BitbucketDriver, get_head_commit};

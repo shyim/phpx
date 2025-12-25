@@ -4,22 +4,22 @@ use anyhow::{Context, Result};
 use clap::Args;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use phpx_pm::{
-    autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload},
+    autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload, RootPackageInfo},
     http::HttpClient,
     installer::{InstallConfig, InstallationManager},
     json::{ComposerJson, ComposerLock, LockedPackage, LockSource, LockDist, LockAutoload, LockAuthor, LockFunding},
     plugin::PluginRegistry,
-    repository::{ComposerRepository, RepositoryManager},
+    repository::{ComposerRepository, RepositoryManager, get_head_commit},
     solver::{Pool, Policy, Request, Solver},
     Package,
     package::{Autoload, AutoloadPath},
 };
-use std::collections::HashSet;
 
 use crate::pm::platform::PlatformInfo;
 
@@ -355,10 +355,17 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
     if !args.no_autoloader && !args.dry_run {
         println!("{} Generating autoload files", style("Info:").cyan());
 
-        // Convert packages to PackageAutoload
-        let package_autoloads: Vec<PackageAutoload> = lock.packages.iter()
-            .map(locked_package_to_autoload)
+        // Build alias map (empty for update since we don't have aliases in newly resolved packages)
+        let aliases_map: HashMap<String, Vec<String>> = HashMap::new();
+        let dev_mode = !args.no_dev;
+
+        // Convert packages to PackageAutoload (all are non-dev after update since we separate later)
+        let mut package_autoloads: Vec<PackageAutoload> = lock.packages.iter()
+            .map(|lp| locked_package_to_autoload(lp, false, &aliases_map))
             .collect();
+        if dev_mode {
+            package_autoloads.extend(lock.packages_dev.iter().map(|lp| locked_package_to_autoload(lp, true, &aliases_map)));
+        }
 
         let autoload_config = AutoloadConfig {
             vendor_dir: install_config.vendor_dir.clone(),
@@ -377,7 +384,19 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
         };
 
-        generator.generate(&package_autoloads, root_autoload.as_ref())
+        // Build root package info
+        let reference = get_head_commit(&working_dir);
+        let root_package = RootPackageInfo {
+            name: composer_json.name.clone().unwrap_or_else(|| "__root__".to_string()),
+            pretty_version: composer_json.version.clone().unwrap_or_else(|| "dev-main".to_string()),
+            version: composer_json.version.clone().unwrap_or_else(|| "dev-main".to_string()),
+            reference,
+            package_type: composer_json.package_type.clone(),
+            aliases: Vec::new(),
+            dev_mode,
+        };
+
+        generator.generate(&package_autoloads, root_autoload.as_ref(), Some(&root_package))
             .context("Failed to generate autoloader")?;
 
         // Run plugin hooks (post-autoload-dump)
@@ -399,7 +418,7 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
 }
 
 /// Convert a LockedPackage to a PackageAutoload
-fn locked_package_to_autoload(lp: &LockedPackage) -> PackageAutoload {
+fn locked_package_to_autoload(lp: &LockedPackage, is_dev: bool, aliases_map: &HashMap<String, Vec<String>>) -> PackageAutoload {
     let autoload = convert_lock_autoload(&lp.autoload);
 
     // Extract requires (filter out platform requirements like php, ext-*)
@@ -408,11 +427,27 @@ fn locked_package_to_autoload(lp: &LockedPackage) -> PackageAutoload {
         .cloned()
         .collect();
 
+    // Get the reference from source or dist
+    let reference = lp.source.as_ref()
+        .map(|s| s.reference.clone())
+        .or_else(|| lp.dist.as_ref().and_then(|d| d.reference.clone()));
+
+    // Get aliases for this package
+    let aliases = aliases_map.get(&lp.name).cloned().unwrap_or_default();
+
     PackageAutoload {
         name: lp.name.clone(),
         autoload,
         install_path: lp.name.clone(),
         requires,
+        pretty_version: Some(lp.version.clone()),
+        version: Some(lp.version.clone()),
+        reference,
+        package_type: lp.package_type.clone(),
+        dev_requirement: is_dev,
+        aliases,
+        replaces: lp.replace.clone(),
+        provides: lp.provide.clone(),
     }
 }
 

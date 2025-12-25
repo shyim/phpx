@@ -3,13 +3,15 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use console::style;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use phpx_pm::{
-    autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload},
-    json::{ComposerJson, ComposerLock},
+    autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload, RootPackageInfo},
+    json::{ComposerJson, ComposerLock, LockedPackage},
     package::Autoload,
     plugin::PluginRegistry,
+    repository::get_head_commit,
     Package,
 };
 
@@ -62,14 +64,24 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
 
     // Load composer.lock to get packages and content-hash for suffix
     let lock_path = working_dir.join("composer.lock");
-    let (packages, suffix, installed_packages) = if lock_path.exists() {
+    let (packages, suffix, installed_packages, aliases_map) = if lock_path.exists() {
         let content = std::fs::read_to_string(&lock_path)
             .context("Failed to read composer.lock")?;
         let lock: ComposerLock = serde_json::from_str(&content)
             .context("Failed to parse composer.lock")?;
 
+        // Build alias map from lock file
+        let mut aliases_map: HashMap<String, Vec<String>> = HashMap::new();
+        for alias in &lock.aliases {
+            aliases_map.entry(alias.package.clone())
+                .or_default()
+                .push(alias.alias.clone());
+        }
+
+        let dev_mode = !args.no_dev;
+
         let mut pkgs: Vec<PackageAutoload> = lock.packages.iter()
-            .map(locked_package_to_autoload)
+            .map(|lp| locked_package_to_autoload(lp, false, &aliases_map))
             .collect();
 
         // Build list of installed packages for plugin registry
@@ -77,8 +89,8 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
             .map(|lp| Package::new(&lp.name, &lp.version))
             .collect();
 
-        if !args.no_dev {
-            pkgs.extend(lock.packages_dev.iter().map(locked_package_to_autoload));
+        if dev_mode {
+            pkgs.extend(lock.packages_dev.iter().map(|lp| locked_package_to_autoload(lp, true, &aliases_map)));
             installed.extend(lock.packages_dev.iter().map(|lp| Package::new(&lp.name, &lp.version)));
         }
 
@@ -89,15 +101,31 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
             None
         };
 
-        (pkgs, suffix, installed)
+        (pkgs, suffix, installed, aliases_map)
     } else {
-        (Vec::new(), None, Vec::new())
+        (Vec::new(), None, Vec::new(), HashMap::new())
     };
 
     // Get root autoload from composer.json
     let root_autoload: Option<Autoload> = composer_json.as_ref()
         .map(|cj| cj.autoload.clone().into())
         .filter(|al: &Autoload| !al.is_empty());
+
+    // Build root package info
+    let root_package = composer_json.as_ref().map(|cj| {
+        let name = cj.name.clone().unwrap_or_else(|| "__root__".to_string());
+        let root_aliases = aliases_map.get(&name).cloned().unwrap_or_default();
+        let reference = get_head_commit(&working_dir);
+        RootPackageInfo {
+            name,
+            pretty_version: cj.version.clone().unwrap_or_else(|| "dev-main".to_string()),
+            version: cj.version.clone().unwrap_or_else(|| "dev-main".to_string()),
+            reference,
+            package_type: cj.package_type.clone(),
+            aliases: root_aliases,
+            dev_mode: !args.no_dev,
+        }
+    });
 
     // Generate autoloader
     let config = AutoloadConfig {
@@ -110,7 +138,7 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
     };
 
     let generator = AutoloadGenerator::new(config);
-    generator.generate(&packages, root_autoload.as_ref())
+    generator.generate(&packages, root_autoload.as_ref(), root_package.as_ref())
         .context("Failed to generate autoloader")?;
 
     // Run plugin hooks (post-autoload-dump)
@@ -138,7 +166,7 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
 }
 
 /// Convert a LockedPackage to a PackageAutoload
-fn locked_package_to_autoload(lp: &phpx_pm::json::LockedPackage) -> PackageAutoload {
+fn locked_package_to_autoload(lp: &LockedPackage, is_dev: bool, aliases_map: &HashMap<String, Vec<String>>) -> PackageAutoload {
     let autoload = convert_lock_autoload(&lp.autoload);
 
     let requires: Vec<String> = lp.require.keys()
@@ -146,11 +174,27 @@ fn locked_package_to_autoload(lp: &phpx_pm::json::LockedPackage) -> PackageAutol
         .cloned()
         .collect();
 
+    // Get the reference from source or dist
+    let reference = lp.source.as_ref()
+        .map(|s| s.reference.clone())
+        .or_else(|| lp.dist.as_ref().and_then(|d| d.reference.clone()));
+
+    // Get aliases for this package
+    let aliases = aliases_map.get(&lp.name).cloned().unwrap_or_default();
+
     PackageAutoload {
         name: lp.name.clone(),
         autoload,
         install_path: lp.name.clone(),
         requires,
+        pretty_version: Some(lp.version.clone()),
+        version: Some(lp.version.clone()), // Use same as pretty_version for now
+        reference,
+        package_type: lp.package_type.clone(),
+        dev_requirement: is_dev,
+        aliases,
+        replaces: lp.replace.clone(),
+        provides: lp.provide.clone(),
     }
 }
 
