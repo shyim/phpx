@@ -276,6 +276,19 @@ pub fn run_command(
 
 /// Execute a shell command with optional timeout
 fn execute_shell_command(cmd: &str, working_dir: &Path, ctx: &ScriptContext) -> Result<i32> {
+    // Prepend vendor/bin to PATH so scripts can find vendored binaries
+    let vendor_bin = working_dir.join("vendor").join("bin");
+    let path_env = if vendor_bin.exists() {
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        #[cfg(unix)]
+        let new_path = format!("{}:{}", vendor_bin.display(), current_path);
+        #[cfg(windows)]
+        let new_path = format!("{};{}", vendor_bin.display(), current_path);
+        Some(new_path)
+    } else {
+        None
+    };
+
     #[cfg(unix)]
     let mut command = Command::new("sh");
     #[cfg(unix)]
@@ -287,6 +300,11 @@ fn execute_shell_command(cmd: &str, working_dir: &Path, ctx: &ScriptContext) -> 
     command.arg("/C").arg(cmd);
 
     command.current_dir(working_dir);
+
+    // Add vendor/bin to PATH
+    if let Some(ref path) = path_env {
+        command.env("PATH", path);
+    }
 
     // Add custom environment variables
     for (key, value) in &ctx.env_vars {
