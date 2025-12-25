@@ -32,6 +32,11 @@ impl ClassMapGenerator {
 
     /// Generate classmap for a directory
     pub fn generate(&self, path: &Path) -> Result<HashMap<String, PathBuf>> {
+        self.generate_with_excludes(path, &[])
+    }
+
+    /// Generate classmap for a directory with exclusion patterns
+    pub fn generate_with_excludes(&self, path: &Path, excludes: &[Regex]) -> Result<HashMap<String, PathBuf>> {
         let mut classmap = HashMap::new();
 
         if !path.exists() {
@@ -50,6 +55,11 @@ impl ClassMapGenerator {
                 continue;
             }
 
+            // Check if path matches any exclusion pattern
+            if self.is_excluded(file_path, excludes) {
+                continue;
+            }
+
             // Read and parse the file
             if let Ok(content) = std::fs::read_to_string(file_path) {
                 let classes = self.extract_classes(&content);
@@ -62,12 +72,35 @@ impl ClassMapGenerator {
         Ok(classmap)
     }
 
+    /// Check if a path matches any exclusion pattern
+    fn is_excluded(&self, path: &Path, excludes: &[Regex]) -> bool {
+        if excludes.is_empty() {
+            return false;
+        }
+
+        // Normalize path to forward slashes for matching
+        let path_str = path.to_string_lossy().replace('\\', "/");
+
+        for pattern in excludes {
+            if pattern.is_match(&path_str) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Generate classmap for multiple directories
     pub fn generate_from_paths(&self, paths: &[PathBuf]) -> Result<HashMap<String, PathBuf>> {
+        self.generate_from_paths_with_excludes(paths, &[])
+    }
+
+    /// Generate classmap for multiple directories with exclusion patterns
+    pub fn generate_from_paths_with_excludes(&self, paths: &[PathBuf], excludes: &[Regex]) -> Result<HashMap<String, PathBuf>> {
         let mut classmap = HashMap::new();
 
         for path in paths {
-            let map = self.generate(path)?;
+            let map = self.generate_with_excludes(path, excludes)?;
             classmap.extend(map);
         }
 
@@ -236,5 +269,72 @@ class TestClass {
         assert!(ClassMapGenerator::is_php_file(Path::new("test.PHP")));
         assert!(!ClassMapGenerator::is_php_file(Path::new("test.txt")));
         assert!(!ClassMapGenerator::is_php_file(Path::new("test")));
+    }
+
+    #[test]
+    fn test_generate_with_excludes() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create src directory with a class
+        let src_dir = temp_dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("MyClass.php"), r#"<?php
+namespace App;
+class MyClass {}
+"#).unwrap();
+
+        // Create tests directory with a test class
+        let tests_dir = temp_dir.path().join("tests");
+        fs::create_dir_all(&tests_dir).unwrap();
+        fs::write(tests_dir.join("MyClassTest.php"), r#"<?php
+namespace App\Tests;
+class MyClassTest {}
+"#).unwrap();
+
+        let gen = ClassMapGenerator::new();
+
+        // Without excludes - should find both classes
+        let classmap = gen.generate(temp_dir.path()).unwrap();
+        assert_eq!(classmap.len(), 2);
+        assert!(classmap.contains_key("App\\MyClass"));
+        assert!(classmap.contains_key("App\\Tests\\MyClassTest"));
+
+        // With exclude for tests directory
+        let exclude_pattern = Regex::new(&format!("{}/tests", temp_dir.path().to_string_lossy().replace('\\', "/"))).unwrap();
+        let classmap = gen.generate_with_excludes(temp_dir.path(), &[exclude_pattern]).unwrap();
+        assert_eq!(classmap.len(), 1);
+        assert!(classmap.contains_key("App\\MyClass"));
+        assert!(!classmap.contains_key("App\\Tests\\MyClassTest"));
+    }
+
+    #[test]
+    fn test_generate_with_wildcard_excludes() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create files in various directories
+        let src_dir = temp_dir.path().join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("Class1.php"), "<?php\nclass Class1 {}\n").unwrap();
+
+        let fixtures_dir = temp_dir.path().join("src").join("Fixtures");
+        fs::create_dir_all(&fixtures_dir).unwrap();
+        fs::write(fixtures_dir.join("TestFixture.php"), "<?php\nclass TestFixture {}\n").unwrap();
+
+        let nested_fixtures = temp_dir.path().join("src").join("Sub").join("Fixtures");
+        fs::create_dir_all(&nested_fixtures).unwrap();
+        fs::write(nested_fixtures.join("NestedFixture.php"), "<?php\nclass NestedFixture {}\n").unwrap();
+
+        let gen = ClassMapGenerator::new();
+
+        // Without excludes - should find all 3 classes
+        let classmap = gen.generate(temp_dir.path()).unwrap();
+        assert_eq!(classmap.len(), 3);
+
+        // With exclude for **/Fixtures/** (exclude all Fixtures directories)
+        let pattern = format!("{}/.*Fixtures", temp_dir.path().to_string_lossy().replace('\\', "/"));
+        let exclude_pattern = Regex::new(&pattern).unwrap();
+        let classmap = gen.generate_with_excludes(temp_dir.path(), &[exclude_pattern]).unwrap();
+        assert_eq!(classmap.len(), 1);
+        assert!(classmap.contains_key("Class1"));
     }
 }

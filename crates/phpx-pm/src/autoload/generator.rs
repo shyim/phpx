@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use md5::{Md5, Digest};
+use regex::Regex;
 
 use crate::package::Autoload;
 use crate::Result;
@@ -174,6 +175,62 @@ impl AutoloadGenerator {
         })
     }
 
+    /// Collect and compile exclude-from-classmap patterns from all packages
+    fn collect_exclude_patterns(&self, packages: &[PackageAutoload], root_autoload: Option<&Autoload>) -> Vec<Regex> {
+        let mut patterns = Vec::new();
+
+        // Collect patterns from packages
+        for pkg in packages {
+            for pattern in &pkg.autoload.exclude_from_classmap {
+                if let Some(regex) = self.compile_exclude_pattern(pattern, &pkg.install_path, false) {
+                    patterns.push(regex);
+                }
+            }
+        }
+
+        // Collect patterns from root autoload
+        if let Some(autoload) = root_autoload {
+            for pattern in &autoload.exclude_from_classmap {
+                if let Some(regex) = self.compile_exclude_pattern(pattern, "", true) {
+                    patterns.push(regex);
+                }
+            }
+        }
+
+        patterns
+    }
+
+    /// Compile an exclude-from-classmap pattern to a regex
+    /// Handles wildcards (* and **) similar to Composer
+    fn compile_exclude_pattern(&self, pattern: &str, install_path: &str, is_root: bool) -> Option<Regex> {
+        // Normalize path separators
+        let pattern = pattern.replace('\\', "/").trim_matches('/').to_string();
+
+        // Build the full path pattern
+        let full_pattern = if is_root {
+            // For root package, pattern is relative to base_dir
+            let base = self.config.base_dir.to_string_lossy().replace('\\', "/");
+            format!("{}/{}", base.trim_end_matches('/'), pattern)
+        } else {
+            // For packages, pattern is relative to the package install path
+            let vendor = self.config.vendor_dir.to_string_lossy().replace('\\', "/");
+            format!("{}/{}/{}", vendor.trim_end_matches('/'), install_path, pattern)
+        };
+
+        // Escape regex special characters, but preserve * and **
+        let escaped = regex::escape(&full_pattern);
+
+        // Convert wildcards:
+        // ** matches any characters including /
+        // * matches any characters except /
+        let regex_pattern = escaped
+            .replace(r"\*\*", ".*")  // ** -> match anything
+            .replace(r"\*", "[^/]*"); // * -> match anything except /
+
+        // Compile the regex
+        Regex::new(&regex_pattern).ok()
+    }
+
     /// Generate autoloader for installed packages
     pub fn generate(&self, packages: &[PackageAutoload], root_autoload: Option<&Autoload>, root_package: Option<&RootPackageInfo>) -> Result<()> {
         let composer_dir = self.config.vendor_dir.join("composer");
@@ -183,6 +240,9 @@ impl AutoloadGenerator {
 
         // Sort packages by dependency weight for reproducible output
         let sorted_packages = sort_packages_by_dependency(packages);
+
+        // Collect exclude-from-classmap patterns from all packages
+        let exclude_patterns = self.collect_exclude_patterns(&sorted_packages, root_autoload);
 
         // Collect autoload data from all packages
         // Use BTreeMap for sorted output
@@ -194,17 +254,17 @@ impl AutoloadGenerator {
 
         // Process package autoloads in sorted order (dependencies first)
         for pkg in &sorted_packages {
-            self.process_autoload(&pkg.autoload, &pkg.install_path, &pkg.name, &mut psr4, &mut psr0, &mut classmap, &mut files)?;
+            self.process_autoload(&pkg.autoload, &pkg.install_path, &pkg.name, &mut psr4, &mut psr0, &mut classmap, &mut files, &exclude_patterns)?;
         }
 
         // Process root autoload last (root overrides)
         if let Some(autoload) = root_autoload {
-            self.process_autoload(autoload, "", "__root__", &mut psr4, &mut psr0, &mut classmap, &mut files)?;
+            self.process_autoload(autoload, "", "__root__", &mut psr4, &mut psr0, &mut classmap, &mut files, &exclude_patterns)?;
         }
 
         // Generate authoritative classmap if optimizing
         if self.config.optimize || self.config.authoritative {
-            self.generate_optimized_classmap(&psr4, &psr0, &mut classmap)?;
+            self.generate_optimized_classmap(&psr4, &psr0, &mut classmap, &exclude_patterns)?;
         }
 
         // Add Composer\InstalledVersions to classmap
@@ -241,6 +301,7 @@ impl AutoloadGenerator {
         psr0: &mut BTreeMap<String, Vec<String>>,
         classmap: &mut BTreeMap<String, String>,
         files: &mut Vec<(String, String)>,
+        exclude_patterns: &[Regex],
     ) -> Result<()> {
         let is_root = install_path.is_empty();
 
@@ -272,7 +333,7 @@ impl AutoloadGenerator {
             } else {
                 self.config.vendor_dir.join(install_path).join(path)
             };
-            let classes = self.classmap_generator.generate(&full_path)?;
+            let classes = self.classmap_generator.generate_with_excludes(&full_path, exclude_patterns)?;
             for (class_name, file_path) in classes {
                 let path_code = self.path_to_code(&file_path);
                 classmap.insert(class_name, path_code);
@@ -344,13 +405,14 @@ impl AutoloadGenerator {
         psr4: &BTreeMap<String, Vec<String>>,
         psr0: &BTreeMap<String, Vec<String>>,
         classmap: &mut BTreeMap<String, String>,
+        exclude_patterns: &[Regex],
     ) -> Result<()> {
         // Scan PSR-4 directories
         for paths in psr4.values() {
             for path_code in paths {
                 // Extract actual path from code like "$vendorDir . '/symfony/console'"
                 if let Some(path) = self.extract_path_from_code(path_code) {
-                    let classes = self.classmap_generator.generate(Path::new(&path))?;
+                    let classes = self.classmap_generator.generate_with_excludes(Path::new(&path), exclude_patterns)?;
                     for (class_name, file_path) in classes {
                         let code = self.path_to_code(&file_path);
                         classmap.insert(class_name, code);
@@ -363,7 +425,7 @@ impl AutoloadGenerator {
         for paths in psr0.values() {
             for path_code in paths {
                 if let Some(path) = self.extract_path_from_code(path_code) {
-                    let classes = self.classmap_generator.generate(Path::new(&path))?;
+                    let classes = self.classmap_generator.generate_with_excludes(Path::new(&path), exclude_patterns)?;
                     for (class_name, file_path) in classes {
                         let code = self.path_to_code(&file_path);
                         classmap.insert(class_name, code);
