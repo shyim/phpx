@@ -511,6 +511,38 @@ impl Package {
         links
     }
 
+    /// Returns all names this package "owns" - its name plus all provides and replaces
+    ///
+    /// When `include_provides` is true, includes both provides and replaces.
+    /// When false, only includes the package name and replaces (replaces are stronger).
+    ///
+    /// This is used for:
+    /// - Pool indexing (finding packages by any of their names)
+    /// - Same-name conflict detection (packages providing same name conflict)
+    pub fn get_names(&self, include_provides: bool) -> Vec<String> {
+        let mut names = vec![self.name.to_lowercase()];
+
+        // Replaces are always included (stronger relationship)
+        for (replaced_name, _) in &self.replace {
+            let name = replaced_name.to_lowercase();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+
+        // Provides are only included when requested
+        if include_provides {
+            for (provided_name, _) in &self.provide {
+                let name = provided_name.to_lowercase();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+
+        names
+    }
+
     /// Updates both source and dist references (for version control)
     pub fn set_references(&mut self, reference: impl Into<String>) {
         let reference = reference.into();

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::pool::{Pool, PackageId};
+use super::pool::{Pool, PackageId, PoolEntry};
 use super::request::Request;
 use super::rule::{Rule, RuleType};
 use super::rule_set::RuleSet;
@@ -12,6 +12,8 @@ use super::rule_set::RuleSet;
 /// - Package requirements: if A is installed, then B|C|D must be installed
 /// - Conflicts: A and B cannot both be installed
 /// - Same-name: only one version of a package can be installed
+/// - Provider conflicts: packages providing/replacing the same name conflict
+/// - Alias rules: if an alias is installed, its base package must be installed
 pub struct RuleGenerator<'a> {
     pool: &'a Pool,
     rules: RuleSet,
@@ -19,6 +21,8 @@ pub struct RuleGenerator<'a> {
     added_packages: HashSet<PackageId>,
     /// Package names we've added same-name rules for
     same_name_added: HashSet<String>,
+    /// Track which names have packages providing/replacing them (name -> package ids)
+    providers_by_name: std::collections::HashMap<String, Vec<PackageId>>,
 }
 
 impl<'a> RuleGenerator<'a> {
@@ -29,6 +33,7 @@ impl<'a> RuleGenerator<'a> {
             rules: RuleSet::new(),
             added_packages: HashSet::new(),
             same_name_added: HashSet::new(),
+            providers_by_name: std::collections::HashMap::new(),
         }
     }
 
@@ -42,6 +47,9 @@ impl<'a> RuleGenerator<'a> {
 
         // Add conflict rules for all processed packages
         self.add_conflict_rules();
+
+        // Add provider conflict rules (packages providing/replacing same name)
+        self.add_provider_conflict_rules();
 
         self.rules
     }
@@ -101,6 +109,57 @@ impl<'a> RuleGenerator<'a> {
         }
         self.added_packages.insert(package_id);
 
+        // Check if this is an alias - if so, add alias-specific rules
+        if let Some(entry) = self.pool.entry(package_id) {
+            if let PoolEntry::Alias(alias) = entry {
+                // If alias is installed, base package must be installed
+                if let Some(base_id) = self.pool.get_alias_base(package_id) {
+                    // Rule: alias -> base (if alias is installed, base must be installed)
+                    let rule = Rule::requires(package_id, vec![base_id])
+                        .with_source(package_id)
+                        .with_target(alias.name());
+                    self.rules.add(rule);
+
+                    // Also process the base package's rules
+                    self.add_package_rules(base_id);
+                }
+
+                // Process alias dependencies (may differ from base due to self.version replacement)
+                for (dep_name, constraint) in alias.require() {
+                    if dep_name.starts_with("lib-") {
+                        continue;
+                    }
+
+                    let providers = self.pool.what_provides(dep_name, Some(constraint));
+                    if providers.is_empty() {
+                        let rule = Rule::new(vec![-package_id], RuleType::PackageRequires)
+                            .with_source(package_id)
+                            .with_target(dep_name)
+                            .with_constraint(constraint);
+                        self.rules.add(rule);
+                    } else {
+                        let rule = Rule::requires(package_id, providers.clone())
+                            .with_source(package_id)
+                            .with_target(dep_name)
+                            .with_constraint(constraint);
+                        self.rules.add(rule);
+
+                        for id in providers {
+                            if !self.pool.is_alias(id) {
+                                if let Some(pkg) = self.pool.package(id) {
+                                    if !pkg.name.starts_with("php") && !pkg.name.starts_with("ext-") {
+                                        self.add_package_rules(id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return;
+            }
+        }
+
         let Some(package) = self.pool.package(package_id) else {
             return;
         };
@@ -109,6 +168,14 @@ impl<'a> RuleGenerator<'a> {
 
         // Add same-name rules (only one version can be installed)
         self.add_same_name_rules(&package.name);
+
+        // Track all names this package provides/replaces for later conflict detection
+        for name in package.get_names(true) {
+            self.providers_by_name
+                .entry(name)
+                .or_default()
+                .push(package_id);
+        }
 
         // Add requirement rules
         for (dep_name, constraint) in &package.require {
@@ -179,7 +246,19 @@ impl<'a> RuleGenerator<'a> {
         // For efficiency with many versions, we generate (n choose 2) rules
         for i in 0..versions.len() {
             for j in (i + 1)..versions.len() {
-                let rule = Rule::conflict(vec![versions[i], versions[j]]);
+                let id_a = versions[i];
+                let id_b = versions[j];
+
+                // Skip conflict between an alias and its base package
+                // An alias is just a different version view of the same package,
+                // so they MUST coexist - installing an alias means installing the base.
+                if self.pool.get_alias_base(id_a) == Some(id_b)
+                    || self.pool.get_alias_base(id_b) == Some(id_a)
+                {
+                    continue;
+                }
+
+                let rule = Rule::conflict(vec![id_a, id_b]);
                 self.rules.add(rule);
             }
         }
@@ -210,6 +289,61 @@ impl<'a> RuleGenerator<'a> {
         for (a, b) in conflicts {
             let rule = Rule::conflict(vec![a, b]);
             self.rules.add(rule);
+        }
+    }
+
+    /// Add conflict rules for packages that provide/replace the same name
+    ///
+    /// When multiple packages provide or replace the same package name,
+    /// only one of them can be installed. This is the RULE_PACKAGE_SAME_NAME
+    /// behavior from Composer.
+    fn add_provider_conflict_rules(&mut self) {
+        // For each name that has multiple providers, add pairwise conflicts
+        for (name, provider_ids) in &self.providers_by_name {
+            if provider_ids.len() <= 1 {
+                continue;
+            }
+
+            // Skip if we've already added same-name rules for this name
+            // (the package's actual name is already handled)
+            if self.same_name_added.contains(name) {
+                continue;
+            }
+
+            // Generate pairwise conflict rules
+            // If package A provides "foo" and package B also provides "foo",
+            // then A and B cannot both be installed
+            for i in 0..provider_ids.len() {
+                for j in (i + 1)..provider_ids.len() {
+                    let a = provider_ids[i];
+                    let b = provider_ids[j];
+
+                    // Skip if they're the same package (different versions already handled)
+                    if a == b {
+                        continue;
+                    }
+
+                    // Check if both packages have the same actual name
+                    // (already handled by same_name_rules)
+                    let same_name = if let (Some(pkg_a), Some(pkg_b)) =
+                        (self.pool.package(a), self.pool.package(b))
+                    {
+                        pkg_a.name.to_lowercase() == pkg_b.name.to_lowercase()
+                    } else {
+                        false
+                    };
+
+                    if same_name {
+                        continue;
+                    }
+
+                    // Add conflict rule: these two packages cannot both be installed
+                    // because they both provide/replace the same name
+                    let rule = Rule::conflict(vec![a, b])
+                        .with_target(name);
+                    self.rules.add(rule);
+                }
+            }
         }
     }
 }

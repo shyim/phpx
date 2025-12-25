@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::package::Package;
@@ -9,10 +9,12 @@ use crate::package::Package;
 #[derive(Debug, Clone, Default)]
 pub struct Request {
     /// Required packages from composer.json (name -> constraint)
-    pub requires: HashMap<String, String>,
+    /// Uses BTreeMap for deterministic iteration order
+    pub requires: BTreeMap<String, String>,
 
     /// Development requirements (name -> constraint)
-    pub dev_requires: HashMap<String, String>,
+    /// Uses BTreeMap for deterministic iteration order
+    pub dev_requires: BTreeMap<String, String>,
 
     /// Fixed packages that cannot be changed (e.g., platform packages)
     pub fixed_packages: Vec<Arc<Package>>,
@@ -37,8 +39,8 @@ impl Request {
     /// Create a new empty request
     pub fn new() -> Self {
         Self {
-            requires: HashMap::new(),
-            dev_requires: HashMap::new(),
+            requires: BTreeMap::new(),
+            dev_requires: BTreeMap::new(),
             fixed_packages: Vec::new(),
             locked_packages: Vec::new(),
             update_allowlist: Vec::new(),

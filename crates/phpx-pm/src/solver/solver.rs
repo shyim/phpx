@@ -54,8 +54,19 @@ impl<'a> Solver<'a> {
         // Process assertion rules first (single-literal rules)
         self.process_assertions(state)?;
 
+        // Iteration counter for detecting infinite loops
+        let mut iterations = 0u32;
+        const MAX_ITERATIONS: u32 = 100_000;
+
         // Main solving loop
         loop {
+            iterations += 1;
+            if iterations > MAX_ITERATIONS {
+                // Safety: prevent infinite loops
+                let mut problems = ProblemSet::new();
+                problems.add(Problem::new().with_message("Solver exceeded maximum iterations"));
+                return Err(problems);
+            }
             // Propagate all consequences of current decisions
             if let Err(conflict_rule) = self.propagate(state) {
                 // Conflict found - analyze and learn
@@ -73,20 +84,30 @@ impl<'a> Solver<'a> {
                 // Backtrack to appropriate level
                 state.decisions.revert_to_level(backtrack_level);
 
-                // Add learned rule
-                let learned_id = state.rules.add(learned_rule);
-                state.watch_graph.add_rule(state.rules.get(learned_id).unwrap());
+                // Remove branches above backtrack level
+                state.branches.retain(|b| b.level <= backtrack_level);
 
-                // Decide the learned literal
-                state.decisions.decide(learned_literal, Some(learned_id));
+                // Add learned rule if it has literals
+                if !learned_rule.literals().is_empty() {
+                    let learned_id = state.rules.add(learned_rule);
+                    state.watch_graph.add_rule(state.rules.get(learned_id).unwrap());
+
+                    // Decide the learned literal
+                    state.decisions.decide(learned_literal, Some(learned_id));
+                }
                 continue;
             }
 
             // Find the next undecided package to decide on
             match self.select_next(state, request) {
                 Some((candidates, name)) => {
-                    // Sort by policy preference
-                    let sorted = self.policy.select_preferred(self.pool, &candidates);
+                    // Sort by policy preference, considering the required package name
+                    // This allows preferring same-vendor packages and original over replacers
+                    let sorted = self.policy.select_preferred_for_requirement(
+                        self.pool,
+                        &candidates,
+                        Some(&name),
+                    );
 
                     if sorted.is_empty() {
                         continue;
@@ -97,7 +118,6 @@ impl<'a> Solver<'a> {
 
                     // Try the best candidate
                     let selected = sorted[0];
-                    let _ = name; // Suppress unused warning
 
                     // Record branch point for backtracking
                     if sorted.len() > 1 {
@@ -296,38 +316,88 @@ impl<'a> Solver<'a> {
         None
     }
 
-    /// Analyze a conflict to generate a learned clause
+    /// Analyze a conflict to generate a learned clause using first-UIP scheme
     fn analyze_conflict(&self, state: &SolverState, conflict_rule_id: u32) -> (Literal, u32, Rule) {
-        // Simple conflict analysis: find the decision that caused the conflict
-        // and create a clause that prevents it
-
         let current_level = state.decisions.level();
+
+        // Collect all literals involved in the conflict
+        let mut seen = std::collections::HashSet::new();
         let mut learned_literals = Vec::new();
         let mut backtrack_level = 0u32;
+        let mut literals_at_current_level = 0;
 
-        // Get the conflicting rule
+        // Start with the conflicting rule
+        let mut to_process: Vec<Literal> = Vec::new();
+
         if let Some(rule) = state.rules.get(conflict_rule_id) {
-            // Collect all literals from the conflict
             for &lit in rule.literals() {
-                if let Some(level) = state.decisions.decision_level(lit) {
-                    if level == current_level {
-                        // Literals from current level - add negated
-                        learned_literals.push(-lit);
-                    } else if level > 0 {
-                        // Literals from previous levels
-                        backtrack_level = backtrack_level.max(level);
-                        learned_literals.push(-lit);
+                to_process.push(lit);
+            }
+        }
+
+        // Process literals - resolution until we have exactly one literal at current level
+        while !to_process.is_empty() {
+            let lit = to_process.pop().unwrap();
+            let pkg_id = lit.unsigned_abs() as PackageId;
+
+            if seen.contains(&pkg_id) {
+                continue;
+            }
+            seen.insert(pkg_id);
+
+            if let Some(level) = state.decisions.decision_level(lit) {
+                if level == 0 {
+                    continue; // Skip level 0 decisions
+                }
+
+                if level == current_level {
+                    // Literal at current level
+                    // Check if this was a propagated literal (has a reason)
+                    if let Some(reason_rule_id) = state.decisions.decision_rule(lit) {
+                        if literals_at_current_level > 0 {
+                            // Resolve with the reason - add its literals
+                            if let Some(reason_rule) = state.rules.get(reason_rule_id) {
+                                for &reason_lit in reason_rule.literals() {
+                                    let reason_pkg = reason_lit.unsigned_abs() as PackageId;
+                                    if reason_pkg != pkg_id && !seen.contains(&reason_pkg) {
+                                        to_process.push(reason_lit);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                     }
+                    literals_at_current_level += 1;
+                    learned_literals.push(-lit);
+                } else {
+                    // Literal from earlier level - add to learned clause
+                    backtrack_level = backtrack_level.max(level);
+                    learned_literals.push(-lit);
                 }
             }
+        }
+
+        // If we couldn't find a proper UIP, use a simpler approach
+        if learned_literals.is_empty() {
+            // Fallback: just negate the last decision at current level
+            for &(lit, _) in state.decisions.queue().iter().rev() {
+                if state.decisions.decision_level(lit) == Some(current_level) {
+                    learned_literals.push(-lit);
+                    break;
+                }
+            }
+            backtrack_level = current_level.saturating_sub(1);
         }
 
         // Ensure we backtrack at least one level
         if backtrack_level >= current_level {
             backtrack_level = current_level.saturating_sub(1);
         }
+        if backtrack_level == 0 && current_level > 1 {
+            backtrack_level = 1;
+        }
 
-        // The learned literal is the first one (will become unit after backtracking)
+        // The learned literal is the first one (the UIP, will become unit after backtracking)
         let learned_literal = learned_literals.first().copied().unwrap_or(1);
 
         let learned_rule = Rule::learned(learned_literals);
@@ -357,11 +427,30 @@ impl<'a> Solver<'a> {
 
     /// Build a transaction from the solved decisions
     fn build_transaction(&self, state: &SolverState, request: &Request) -> Transaction {
+        use super::pool::PoolEntry;
+
         let mut transaction = Transaction::new();
+        let mut installed_base_packages = std::collections::HashSet::new();
 
         // Get all packages decided to be installed
         for pkg_id in state.decisions.installed_packages() {
+            // Check if this is an alias package
+            if let Some(entry) = self.pool.entry(pkg_id) {
+                match entry {
+                    PoolEntry::Alias(alias) => {
+                        // Mark alias as installed
+                        transaction.mark_alias_installed(alias.clone());
+                        continue;
+                    }
+                    PoolEntry::Package(_) => {
+                        // Regular package - continue with normal processing
+                    }
+                }
+            }
+
             if let Some(package) = self.pool.package(pkg_id) {
+                installed_base_packages.insert(package.name.to_lowercase());
+
                 // Check if this is an update from a locked package
                 if let Some(locked) = request.get_locked(&package.name) {
                     if locked.version != package.version {
@@ -379,6 +468,17 @@ impl<'a> Solver<'a> {
 
                 // New install
                 transaction.install(package.clone());
+
+                // Mark all aliases as installed when their base package is installed
+                // Composer marks all aliases (branch/root/inline) when the base is installed
+                let aliases = self.pool.get_aliases(pkg_id);
+                for alias_id in aliases {
+                    if let Some(entry) = self.pool.entry(alias_id) {
+                        if let PoolEntry::Alias(alias) = entry {
+                            transaction.mark_alias_installed(alias.clone());
+                        }
+                    }
+                }
             }
         }
 

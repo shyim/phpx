@@ -124,6 +124,8 @@ impl InstallationManager {
                         result.removed.push(pkg.as_ref().clone());
                     }
                     Operation::MarkUnneeded(_) => {}
+                    // Alias operations don't need any file system changes
+                    Operation::MarkAliasInstalled(_) | Operation::MarkAliasUninstalled(_) => {}
                 }
             }
             return Ok(result);
@@ -206,6 +208,8 @@ impl InstallationManager {
                     result.removed.push(pkg.as_ref().clone());
                 }
                 Operation::MarkUnneeded(_) => {}
+                // Alias operations don't need any file system changes
+                Operation::MarkAliasInstalled(_) | Operation::MarkAliasUninstalled(_) => {}
             }
         }
 

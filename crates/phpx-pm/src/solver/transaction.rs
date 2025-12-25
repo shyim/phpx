@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::package::Package;
+use crate::package::{AliasPackage, Package};
 
 /// A transaction represents the changes needed to reach the resolved state.
 #[derive(Debug, Clone, Default)]
@@ -24,6 +24,11 @@ pub enum Operation {
     Uninstall(Arc<Package>),
     /// Mark a package as not needed (but keep it)
     MarkUnneeded(Arc<Package>),
+    /// Mark an alias as installed (the alias package itself is not installed,
+    /// but requirements matching the alias version are satisfied)
+    MarkAliasInstalled(Arc<AliasPackage>),
+    /// Mark an alias as uninstalled
+    MarkAliasUninstalled(Arc<AliasPackage>),
 }
 
 impl Transaction {
@@ -47,6 +52,16 @@ impl Transaction {
     /// Add an uninstall operation
     pub fn uninstall(&mut self, package: Arc<Package>) {
         self.operations.push(Operation::Uninstall(package));
+    }
+
+    /// Add a mark alias installed operation
+    pub fn mark_alias_installed(&mut self, alias: Arc<AliasPackage>) {
+        self.operations.push(Operation::MarkAliasInstalled(alias));
+    }
+
+    /// Add a mark alias uninstalled operation
+    pub fn mark_alias_uninstalled(&mut self, alias: Arc<AliasPackage>) {
+        self.operations.push(Operation::MarkAliasUninstalled(alias));
     }
 
     /// Check if the transaction is empty
@@ -109,6 +124,7 @@ impl Transaction {
         let mut updates: Vec<Operation> = Vec::new();
         let mut installs: Vec<Operation> = Vec::new();
         let mut mark_unneeded: Vec<Operation> = Vec::new();
+        let mut alias_ops: Vec<Operation> = Vec::new();
 
         for op in self.operations.drain(..) {
             match &op {
@@ -116,6 +132,7 @@ impl Transaction {
                 Operation::Update { .. } => updates.push(op),
                 Operation::Install(_) => installs.push(op),
                 Operation::MarkUnneeded(_) => mark_unneeded.push(op),
+                Operation::MarkAliasInstalled(_) | Operation::MarkAliasUninstalled(_) => alias_ops.push(op),
             }
         }
 
@@ -125,10 +142,11 @@ impl Transaction {
         // Also sort updates by dependency order (using the target package)
         let sorted_updates = topological_sort_operations(updates);
 
-        // Reconstruct operations: uninstalls first, then updates, then installs, then mark_unneeded
+        // Reconstruct operations: uninstalls first, then updates, then installs, then alias ops, then mark_unneeded
         self.operations.extend(uninstalls);
         self.operations.extend(sorted_updates);
         self.operations.extend(sorted_installs);
+        self.operations.extend(alias_ops);
         self.operations.extend(mark_unneeded);
     }
 
@@ -142,10 +160,20 @@ impl Transaction {
                 Operation::Update { .. } => summary.updates += 1,
                 Operation::Uninstall(_) => summary.uninstalls += 1,
                 Operation::MarkUnneeded(_) => summary.mark_unneeded += 1,
+                Operation::MarkAliasInstalled(_) => summary.alias_installs += 1,
+                Operation::MarkAliasUninstalled(_) => summary.alias_uninstalls += 1,
             }
         }
 
         summary
+    }
+
+    /// Get all alias packages that will be marked as installed
+    pub fn alias_installs(&self) -> impl Iterator<Item = &Arc<AliasPackage>> {
+        self.operations.iter().filter_map(|op| match op {
+            Operation::MarkAliasInstalled(alias) => Some(alias),
+            _ => None,
+        })
     }
 }
 
@@ -156,6 +184,8 @@ pub struct TransactionSummary {
     pub updates: usize,
     pub uninstalls: usize,
     pub mark_unneeded: usize,
+    pub alias_installs: usize,
+    pub alias_uninstalls: usize,
 }
 
 impl std::fmt::Display for TransactionSummary {
