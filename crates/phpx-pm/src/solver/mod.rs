@@ -9,17 +9,20 @@
 //! The solver consists of several key components:
 //!
 //! - [`Pool`]: Registry of all available packages with lookup by name/constraint
+//! - [`PoolOptimizer`]: Reduces pool size before solving for better performance
 //! - [`Request`]: Specification of what needs to be resolved
 //! - [`RuleSet`]: Collection of SAT clauses representing dependencies
 //! - [`Solver`]: The main CDCL algorithm implementation
 //!
 //! # Algorithm Overview
 //!
-//! 1. **Rule Generation**: Convert dependency graph to SAT clauses
-//! 2. **Unit Propagation**: Force decisions from unit clauses
-//! 3. **Decision Making**: Choose package versions using policy
-//! 4. **Conflict Analysis**: Learn from conflicts to avoid repeating mistakes
-//! 5. **Backtracking**: Revert to appropriate level on conflict
+//! 1. **Pool Optimization** (optional, enabled by default): Reduce pool size by removing
+//!    packages with identical dependencies and filtering impossible versions
+//! 2. **Rule Generation**: Convert dependency graph to SAT clauses
+//! 3. **Unit Propagation**: Force decisions from unit clauses
+//! 4. **Decision Making**: Choose package versions using policy
+//! 5. **Conflict Analysis**: Learn from conflicts to avoid repeating mistakes
+//! 6. **Backtracking**: Revert to appropriate level on conflict
 //!
 //! # Example
 //!
@@ -39,9 +42,13 @@
 //!     Ok(transaction) => println!("Solution found!"),
 //!     Err(problems) => println!("No solution: {:?}", problems),
 //! }
+//!
+//! // To disable pool optimization:
+//! let solver = Solver::new(&pool, &policy).with_optimization(false);
 //! ```
 
 mod pool;
+mod pool_optimizer;
 mod request;
 mod rule;
 mod rule_set;
@@ -57,6 +64,7 @@ mod policy;
 mod tests;
 
 pub use pool::{Pool, PoolBuilder, PoolEntry, PackageId};
+pub use pool_optimizer::PoolOptimizer;
 pub use request::Request;
 pub use rule::{Rule, RuleType, Literal};
 pub use rule_set::RuleSet;

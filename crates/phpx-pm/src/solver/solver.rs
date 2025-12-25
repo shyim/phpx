@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use super::decisions::Decisions;
 use super::pool::{Pool, PackageId};
+use super::pool_optimizer::PoolOptimizer;
 use super::policy::Policy;
 use super::problem::{Problem, ProblemSet};
 use super::request::Request;
@@ -20,37 +21,64 @@ pub struct Solver<'a> {
     pool: &'a Pool,
     /// Selection policy
     policy: &'a Policy,
+    /// Whether to optimize the pool before solving
+    optimize_pool: bool,
 }
 
 impl<'a> Solver<'a> {
     /// Create a new solver
     pub fn new(pool: &'a Pool, policy: &'a Policy) -> Self {
-        Self { pool, policy }
+        Self {
+            pool,
+            policy,
+            optimize_pool: true, // Enable optimization by default
+        }
+    }
+
+    /// Set whether to optimize the pool before solving.
+    ///
+    /// Pool optimization can significantly speed up solving for large dependency graphs
+    /// by removing packages that can't possibly be selected. Enabled by default.
+    pub fn with_optimization(mut self, optimize: bool) -> Self {
+        self.optimize_pool = optimize;
+        self
     }
 
     /// Solve the dependency resolution problem.
     ///
     /// Returns a Transaction on success, or a ProblemSet explaining failures.
     pub fn solve(&self, request: &Request) -> Result<Transaction, ProblemSet> {
+        if self.optimize_pool {
+            // Optimize the pool first to reduce the search space
+            let mut optimizer = PoolOptimizer::new(self.policy);
+            let optimized_pool = optimizer.optimize(request, self.pool);
+            self.solve_with_pool(&optimized_pool, request)
+        } else {
+            self.solve_with_pool(self.pool, request)
+        }
+    }
+
+    /// Internal solve method that works with any pool reference.
+    fn solve_with_pool(&self, pool: &Pool, request: &Request) -> Result<Transaction, ProblemSet> {
         // Generate rules from the dependency graph
-        let generator = RuleGenerator::new(self.pool);
+        let generator = RuleGenerator::new(pool);
         let rules = generator.generate(request);
 
         // Create solver state
         let mut state = SolverState::new(rules);
 
         // Run the SAT solver
-        match self.run_sat(&mut state, request) {
+        match self.run_sat(&mut state, pool, request) {
             Ok(()) => {
                 // Build transaction from decisions
-                Ok(self.build_transaction(&state, request))
+                Ok(self.build_transaction(&state, pool, request))
             }
             Err(problems) => Err(problems),
         }
     }
 
     /// Main SAT solving loop
-    fn run_sat(&self, state: &mut SolverState, request: &Request) -> Result<(), ProblemSet> {
+    fn run_sat(&self, state: &mut SolverState, pool: &Pool, request: &Request) -> Result<(), ProblemSet> {
         // Process assertion rules first (single-literal rules)
         self.process_assertions(state)?;
 
@@ -132,7 +160,7 @@ impl<'a> Solver<'a> {
                     // Sort by policy preference, considering the required package name
                     // This allows preferring same-vendor packages and original over replacers
                     let sorted = self.policy.select_preferred_for_requirement(
-                        self.pool,
+                        pool,
                         &candidates,
                         Some(&name),
                     );
@@ -454,7 +482,7 @@ impl<'a> Solver<'a> {
     }
 
     /// Build a transaction from the solved decisions
-    fn build_transaction(&self, state: &SolverState, request: &Request) -> Transaction {
+    fn build_transaction(&self, state: &SolverState, pool: &Pool, request: &Request) -> Transaction {
         use super::pool::PoolEntry;
 
         let mut transaction = Transaction::new();
@@ -463,7 +491,7 @@ impl<'a> Solver<'a> {
         // Get all packages decided to be installed
         for pkg_id in state.decisions.installed_packages() {
             // Check if this is an alias package
-            if let Some(entry) = self.pool.entry(pkg_id) {
+            if let Some(entry) = pool.entry(pkg_id) {
                 match entry {
                     PoolEntry::Alias(alias) => {
                         // Mark alias as installed
@@ -476,7 +504,7 @@ impl<'a> Solver<'a> {
                 }
             }
 
-            if let Some(package) = self.pool.package(pkg_id) {
+            if let Some(package) = pool.package(pkg_id) {
                 installed_base_packages.insert(package.name.to_lowercase());
 
                 // Check if this is an update from a locked package
@@ -499,9 +527,9 @@ impl<'a> Solver<'a> {
 
                 // Mark all aliases as installed when their base package is installed
                 // Composer marks all aliases (branch/root/inline) when the base is installed
-                let aliases = self.pool.get_aliases(pkg_id);
+                let aliases = pool.get_aliases(pkg_id);
                 for alias_id in aliases {
-                    if let Some(entry) = self.pool.entry(alias_id) {
+                    if let Some(entry) = pool.entry(alias_id) {
                         if let PoolEntry::Alias(alias) = entry {
                             transaction.mark_alias_installed(alias.clone());
                         }
@@ -515,7 +543,7 @@ impl<'a> Solver<'a> {
             let is_installed = state.decisions
                 .installed_packages()
                 .any(|id| {
-                    self.pool.package(id)
+                    pool.package(id)
                         .map(|p| p.name == locked.name)
                         .unwrap_or(false)
                 });
