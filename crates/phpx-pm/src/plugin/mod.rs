@@ -5,7 +5,9 @@
 //! execute PHP-based Composer plugins, popular plugins are manually
 //! ported and registered here.
 
+mod composer_bin;
 mod registry;
 mod symfony_runtime;
 
+pub use composer_bin::BinConfig;
 pub use registry::PluginRegistry;

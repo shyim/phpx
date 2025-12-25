@@ -6,6 +6,7 @@ use crate::json::ComposerJson;
 use crate::package::Package;
 use crate::Result;
 
+use super::composer_bin::ComposerBinPlugin;
 use super::symfony_runtime::SymfonyRuntimePlugin;
 
 /// Registry of ported Composer plugins.
@@ -37,6 +38,7 @@ impl PluginRegistry {
     pub fn new() -> Self {
         Self {
             plugins: vec![
+                Box::new(ComposerBinPlugin),
                 Box::new(SymfonyRuntimePlugin),
             ],
         }

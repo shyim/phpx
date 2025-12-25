@@ -196,10 +196,17 @@ pub fn run_command(
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| "phpx".to_string());
 
-        let full_cmd = if extra_args.is_empty() {
-            format!("{} {}", phpx_binary, composer_cmd)
+        // Check if this is a "bin" command - route to "pm bin"
+        let adjusted_cmd = if composer_cmd.starts_with("bin ") {
+            format!("pm {}", composer_cmd)
         } else {
-            format!("{} {} {}", phpx_binary, composer_cmd, extra_args.join(" "))
+            composer_cmd.to_string()
+        };
+
+        let full_cmd = if extra_args.is_empty() {
+            format!("{} {}", phpx_binary, adjusted_cmd)
+        } else {
+            format!("{} {} {}", phpx_binary, adjusted_cmd, extra_args.join(" "))
         };
 
         return execute_shell_command(&full_cmd, working_dir, &ctx.env_vars);

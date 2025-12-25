@@ -122,6 +122,11 @@ pub async fn execute(args: AddArgs) -> Result<i32> {
             lock: false,
             optimize_autoloader: args.optimize_autoloader,
             working_dir: working_dir.clone(),
+            ansi: false,
+            no_ansi: false,
+            no_interaction: false,
+            quiet: false,
+            verbose: 0,
         };
 
         return crate::update::execute(update_args).await;

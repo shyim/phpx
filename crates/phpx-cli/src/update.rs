@@ -84,6 +84,27 @@ pub struct UpdateArgs {
     /// Working directory
     #[arg(short = 'd', long, default_value = ".")]
     pub working_dir: PathBuf,
+
+    // Common Composer flags (for compatibility)
+    /// Force ANSI output
+    #[arg(long)]
+    pub ansi: bool,
+
+    /// Disable ANSI output
+    #[arg(long)]
+    pub no_ansi: bool,
+
+    /// Do not ask any interactive question
+    #[arg(short = 'n', long)]
+    pub no_interaction: bool,
+
+    /// Do not output any message
+    #[arg(short = 'q', long)]
+    pub quiet: bool,
+
+    /// Increase verbosity (-v, -vv, -vvv)
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
 }
 
 pub async fn execute(args: UpdateArgs) -> Result<i32> {

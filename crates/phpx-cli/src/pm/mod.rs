@@ -1,6 +1,7 @@
 //! Package manager subcommands.
 
 mod audit;
+pub mod bin;
 mod bump;
 mod exec;
 mod search;
@@ -18,6 +19,7 @@ use clap::Subcommand;
 use anyhow::Result;
 
 pub use audit::AuditArgs;
+pub use bin::BinArgs;
 pub use bump::BumpArgs;
 pub use exec::ExecArgs;
 pub use search::SearchArgs;
@@ -34,6 +36,9 @@ pub use run::RunArgs;
 pub enum PmCommands {
     /// Check for security vulnerabilities in installed packages
     Audit(AuditArgs),
+
+    /// Run a command in a bin namespace (vendor-bin plugin)
+    Bin(BinArgs),
 
     /// Bump version constraints in composer.json to locked versions
     Bump(BumpArgs),
@@ -69,6 +74,7 @@ pub enum PmCommands {
 pub async fn execute(command: PmCommands) -> Result<i32> {
     match command {
         PmCommands::Audit(args) => audit::execute(args).await,
+        PmCommands::Bin(args) => bin::execute(args).await,
         PmCommands::Bump(args) => bump::execute(args).await,
         PmCommands::Exec(args) => exec::execute(args).await,
         PmCommands::Search(args) => search::execute(args).await,
