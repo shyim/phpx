@@ -736,7 +736,7 @@ fn test_install_recursive_alias_dependencies() {
         "1.1.0.0".to_string(),
         "1.1".to_string(),
     );
-    pool.add_alias(alias);
+    pool.add_alias_package(alias);
 
     let policy = Policy::new();
     let solver = Solver::new(&pool, &policy);
@@ -788,7 +788,7 @@ fn test_install_dev_alias() {
         "1.1.0.0".to_string(),
         "1.1".to_string(),
     );
-    pool.add_alias(alias);
+    pool.add_alias_package(alias);
 
     let policy = Policy::new();
     let solver = Solver::new(&pool, &policy);
@@ -834,7 +834,7 @@ fn test_alias_what_provides() {
         "1.1.0.0".to_string(),
         "1.1".to_string(),
     );
-    pool.add_alias(alias);
+    pool.add_alias_package(alias);
 
     // Check all packages named 'a'
     let all_a = pool.packages_by_name("a");
@@ -864,7 +864,7 @@ fn test_install_root_aliases_if_alias_of_is_installed() {
         "1.1".to_string(),
     );
     alias_a.set_root_package_alias(true);
-    pool.add_alias(alias_a);
+    pool.add_alias_package(alias_a);
 
     // B 1.0 with root alias 1.1
     let pkg_b = Package::new("b", "1.0.0");
@@ -875,7 +875,7 @@ fn test_install_root_aliases_if_alias_of_is_installed() {
         "1.1".to_string(),
     );
     alias_b.set_root_package_alias(true);
-    pool.add_alias(alias_b);
+    pool.add_alias_package(alias_b);
 
     // C 1.0 with regular alias 1.1 (not root)
     let pkg_c = Package::new("c", "1.0.0");
@@ -885,7 +885,7 @@ fn test_install_root_aliases_if_alias_of_is_installed() {
         "1.1.0.0".to_string(),
         "1.1".to_string(),
     );
-    pool.add_alias(alias_c);
+    pool.add_alias_package(alias_c);
 
     let policy = Policy::new();
     let solver = Solver::new(&pool, &policy);

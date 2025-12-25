@@ -243,11 +243,47 @@ impl Pool {
         id
     }
 
-    /// Add an alias package to the pool, returning its ID
+    /// Add an alias package to the pool by base package ID, returning its ID
     ///
     /// This creates a new pool entry for the alias that references the base package.
     /// The alias will have its own ID but share the underlying package data.
-    pub fn add_alias(&mut self, alias: AliasPackage) -> PackageId {
+    ///
+    /// # Arguments
+    /// * `base_id` - The ID of the base package (must already be in the pool)
+    /// * `alias_version` - The normalized version for the alias
+    /// * `is_root_package_alias` - Whether this alias was created from root package requirements
+    ///
+    /// # Returns
+    /// The ID of the newly created alias package
+    pub fn add_alias(&mut self, base_id: PackageId, alias_version: &str, is_root_package_alias: bool) -> PackageId {
+        let base_pkg = self.package(base_id).cloned();
+        let Some(base_pkg) = base_pkg else {
+            return 0; // Base package not found
+        };
+
+        let mut alias = AliasPackage::new(
+            base_pkg,
+            alias_version.to_string(),
+            alias_version.to_string(),
+        );
+        alias.set_root_package_alias(is_root_package_alias);
+
+        // Copy the repository info from the base package
+        let repo_name = self.package_repos.get(&base_id).cloned();
+
+        self.add_alias_internal(alias, repo_name)
+    }
+
+    /// Add an alias package directly to the pool, returning its ID
+    ///
+    /// This is the low-level API that takes a fully constructed AliasPackage.
+    /// For most use cases, prefer `add_alias` which takes a base package ID.
+    pub fn add_alias_package(&mut self, alias: AliasPackage) -> PackageId {
+        self.add_alias_internal(alias, None)
+    }
+
+    /// Add an alias package to the pool (internal method)
+    fn add_alias_internal(&mut self, alias: AliasPackage, repo_name: Option<String>) -> PackageId {
         let id = self.entries.len() as PackageId;
         let name = alias.name().to_lowercase();
 
@@ -289,6 +325,11 @@ impl Pool {
             self.alias_map.insert(id, base_id);
         }
 
+        // Track repository source for alias
+        if let Some(repo) = repo_name {
+            self.package_repos.insert(id, repo);
+        }
+
         id
     }
 
@@ -319,6 +360,16 @@ impl Pool {
     /// Check if a package ID represents an alias
     pub fn is_alias(&self, id: PackageId) -> bool {
         self.entry(id).map(|e| e.is_alias()).unwrap_or(false)
+    }
+
+    /// Check if an alias is a root package alias
+    pub fn is_root_package_alias(&self, id: PackageId) -> bool {
+        if let Some(entry) = self.entry(id) {
+            if let Some(alias) = entry.as_alias() {
+                return alias.is_root_package_alias();
+            }
+        }
+        false
     }
 
     /// Get the base package ID for an alias
@@ -948,7 +999,7 @@ mod tests {
             "1.0.0.0".to_string(),
             "1.0.0".to_string(),
         );
-        let alias_id = pool.add_alias(alias);
+        let alias_id = pool.add_alias_package(alias);
 
         // Verify alias was added
         assert!(alias_id > base_id);
@@ -975,7 +1026,7 @@ mod tests {
             "1.0.0.0".to_string(),
             "1.0.0".to_string(),
         );
-        pool.add_alias(alias);
+        pool.add_alias_package(alias);
 
         // Should find both dev-main and the 1.0.0 alias
         let all_versions = pool.packages_by_name("vendor/package");
@@ -1004,7 +1055,7 @@ mod tests {
             "1.0.x-dev".to_string(),
             "1.0.x-dev".to_string(),
         );
-        let alias_id = pool.add_alias(alias);
+        let alias_id = pool.add_alias_package(alias);
 
         // Verify entry types
         let pkg_entry = pool.entry(pkg_id).unwrap();
@@ -1033,7 +1084,7 @@ mod tests {
             "2.0.0.0".to_string(),
             "2.0.0".to_string(),
         );
-        let alias_id = pool.add_alias(alias);
+        let alias_id = pool.add_alias_package(alias);
 
         // Verify versions through entries
         let base_entry = pool.entry(base_id).unwrap();
@@ -1161,6 +1212,63 @@ mod tests {
             .build();
 
         assert_eq!(pool.len(), 2);
+    }
+
+    // =========================================================================
+    // Tests ported from Composer's PoolTest.php
+    // =========================================================================
+
+    /// Port of Composer's testPool
+    #[test]
+    fn test_pool() {
+        let mut pool = Pool::new();
+        pool.add_package(Package::new("foo", "1.0.0"));
+
+        let providers = pool.what_provides("foo", None);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(pool.package(providers[0]).unwrap().name, "foo");
+
+        // Second call should return same result (cached)
+        let providers2 = pool.what_provides("foo", None);
+        assert_eq!(providers2.len(), 1);
+    }
+
+    /// Port of Composer's testWhatProvidesPackageWithConstraint
+    #[test]
+    fn test_what_provides_package_with_constraint() {
+        let mut pool = Pool::new();
+        pool.add_package(Package::new("foo", "1.0.0"));
+        pool.add_package(Package::new("foo", "2.0.0"));
+
+        // Without constraint, both packages are returned
+        let all_providers = pool.what_provides("foo", None);
+        assert_eq!(all_providers.len(), 2);
+
+        // With constraint "==2.0.0", only the second package matches
+        let filtered = pool.what_provides("foo", Some("==2.0.0"));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(pool.package(filtered[0]).unwrap().version, "2.0.0");
+    }
+
+    /// Port of Composer's testPackageById
+    #[test]
+    fn test_package_by_id() {
+        let mut pool = Pool::new();
+        let id = pool.add_package(Package::new("foo", "1.0.0"));
+
+        let pkg = pool.package(id);
+        assert!(pkg.is_some());
+        assert_eq!(pkg.unwrap().name, "foo");
+        assert_eq!(pkg.unwrap().version, "1.0.0");
+    }
+
+    /// Port of Composer's testWhatProvidesWhenPackageCannotBeFound
+    #[test]
+    fn test_what_provides_when_package_cannot_be_found() {
+        let pool = Pool::new();
+
+        let providers = pool.what_provides("foo", None);
+        assert!(providers.is_empty());
     }
 
 }
