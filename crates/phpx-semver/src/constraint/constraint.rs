@@ -406,6 +406,18 @@ mod tests {
     }
 
     #[test]
+    fn test_dev_version_stability() {
+        // Dev versions should be less than stable versions
+        // 2.1.0.0-dev < 2.1.0.0
+        assert!(!php_version_compare("2.1.0.0-dev", "2.1.0.0", ">="), "2.1.0.0-dev should NOT be >= 2.1.0.0");
+        assert!(php_version_compare("2.1.0.0-dev", "2.1.0.0", "<"), "2.1.0.0-dev should be < 2.1.0.0");
+
+        // 2.1-dev normalized is typically 2.1.0.0-dev
+        assert!(!php_version_compare("2.1-dev", "2.1", ">="), "2.1-dev should NOT be >= 2.1");
+        assert!(php_version_compare("2.1-dev", "2.1", "<"), "2.1-dev should be < 2.1");
+    }
+
+    #[test]
     fn test_match_specific() {
         let c1 = Constraint::new(Operator::GreaterThan, "1.0.0".to_string()).unwrap();
         let c2 = Constraint::new(Operator::Equal, "2.0.0".to_string()).unwrap();

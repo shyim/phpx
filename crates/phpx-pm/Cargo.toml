@@ -63,6 +63,9 @@ async-trait = "0.1"
 # Regex
 regex = "1"
 
+# Ordered collections
+indexmap = "2"
+
 # URL handling
 url = "2"
 urlencoding = "2"

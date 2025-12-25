@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use indexmap::IndexMap;
 
 use crate::package::Package;
 
@@ -9,12 +10,12 @@ use crate::package::Package;
 #[derive(Debug, Clone, Default)]
 pub struct Request {
     /// Required packages from composer.json (name -> constraint)
-    /// Uses BTreeMap for deterministic iteration order
-    pub requires: BTreeMap<String, String>,
+    /// Uses IndexMap to preserve insertion order (critical for solver behavior)
+    pub requires: IndexMap<String, String>,
 
     /// Development requirements (name -> constraint)
-    /// Uses BTreeMap for deterministic iteration order
-    pub dev_requires: BTreeMap<String, String>,
+    /// Uses IndexMap to preserve insertion order
+    pub dev_requires: IndexMap<String, String>,
 
     /// Fixed packages that cannot be changed (e.g., platform packages)
     pub fixed_packages: Vec<Arc<Package>>,
@@ -39,8 +40,8 @@ impl Request {
     /// Create a new empty request
     pub fn new() -> Self {
         Self {
-            requires: BTreeMap::new(),
-            dev_requires: BTreeMap::new(),
+            requires: IndexMap::new(),
+            dev_requires: IndexMap::new(),
             fixed_packages: Vec::new(),
             locked_packages: Vec::new(),
             update_allowlist: Vec::new(),

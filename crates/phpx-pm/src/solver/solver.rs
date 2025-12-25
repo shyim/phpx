@@ -69,7 +69,7 @@ impl<'a> Solver<'a> {
             }
             // Propagate all consequences of current decisions
             if let Err(conflict_rule) = self.propagate(state) {
-                // Conflict found - analyze and learn
+                // Conflict found - try alternatives first before CDCL learning
                 if state.decisions.level() == 1 {
                     // Conflict at level 1 means unsolvable
                     let mut problems = ProblemSet::new();
@@ -77,23 +77,51 @@ impl<'a> Solver<'a> {
                     return Err(problems);
                 }
 
-                // Learn from conflict and backtrack
-                let (learned_literal, backtrack_level, learned_rule) =
-                    self.analyze_conflict(state, conflict_rule);
+                // Try to find an alternative at the current or recent branch point
+                let current_level = state.decisions.level();
+                let mut tried_alternative = false;
 
-                // Backtrack to appropriate level
-                state.decisions.revert_to_level(backtrack_level);
+                // Look for a branch at the current level with alternatives
+                if let Some(branch_idx) = state.branches.iter().position(|b| b.level == current_level && !b.alternatives.is_empty()) {
+                    // Get the first alternative and remove it from the list
+                    let alternative = state.branches[branch_idx].alternatives.remove(0);
 
-                // Remove branches above backtrack level
-                state.branches.retain(|b| b.level <= backtrack_level);
+                    // Check if this alternative is still undecided and not conflicting
+                    if state.decisions.undecided(alternative) {
+                        // Revert only the decision at this level
+                        state.decisions.revert_to_level(current_level - 1);
+                        state.decisions.increment_level();
 
-                // Add learned rule if it has literals
-                if !learned_rule.literals().is_empty() {
-                    let learned_id = state.rules.add(learned_rule);
-                    state.watch_graph.add_rule(state.rules.get(learned_id).unwrap());
+                        // Decide to NOT install the previous choice and try the alternative
+                        state.decisions.decide(alternative, None);
+                        tried_alternative = true;
+                    }
 
-                    // Decide the learned literal
-                    state.decisions.decide(learned_literal, Some(learned_id));
+                    // Clean up empty branch entries
+                    if state.branches[branch_idx].alternatives.is_empty() {
+                        state.branches.remove(branch_idx);
+                    }
+                }
+
+                if !tried_alternative {
+                    // No alternatives available, use CDCL learning
+                    let (learned_literal, backtrack_level, learned_rule) =
+                        self.analyze_conflict(state, conflict_rule);
+
+                    // Backtrack to appropriate level
+                    state.decisions.revert_to_level(backtrack_level);
+
+                    // Remove branches above backtrack level
+                    state.branches.retain(|b| b.level <= backtrack_level);
+
+                    // Add learned rule if it has literals
+                    if !learned_rule.literals().is_empty() {
+                        let learned_id = state.rules.add(learned_rule);
+                        state.watch_graph.add_rule(state.rules.get(learned_id).unwrap());
+
+                        // Decide the learned literal
+                        state.decisions.decide(learned_literal, Some(learned_id));
+                    }
                 }
                 continue;
             }

@@ -1601,6 +1601,7 @@ dependencies = [
  "futures-util",
  "git2",
  "glob",
+ "indexmap",
  "indicatif",
  "md-5",
  "pathdiff",

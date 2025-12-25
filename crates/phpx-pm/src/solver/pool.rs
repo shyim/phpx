@@ -301,7 +301,31 @@ impl Pool {
     }
 
     /// Find all packages that provide a given name (including the name itself)
+    ///
+    /// This includes:
+    /// - Direct matches (packages with the exact name)
+    /// - Providers (packages that `provide` this name)
+    /// - Replacers (packages that `replace` this name)
+    ///
+    /// Note: Composer's behavior is that providers/replacers are included in the results,
+    /// but the solver will only auto-select them if there's also a direct package available.
+    /// If only providers/replacers exist, the user must explicitly require them.
     pub fn what_provides(&self, name: &str, constraint: Option<&str>) -> Vec<PackageId> {
+        self.what_provides_with_options(name, constraint, true)
+    }
+
+    /// Find only direct packages with the given name (no providers/replacers)
+    pub fn what_provides_direct_only(&self, name: &str, constraint: Option<&str>) -> Vec<PackageId> {
+        self.what_provides_with_options(name, constraint, false)
+    }
+
+    /// Check if there are any direct packages (not just providers/replacers) for a name
+    pub fn has_direct_packages(&self, name: &str, constraint: Option<&str>) -> bool {
+        !self.what_provides_direct_only(name, constraint).is_empty()
+    }
+
+    /// Internal implementation of what_provides with options
+    fn what_provides_with_options(&self, name: &str, constraint: Option<&str>, include_providers: bool) -> Vec<PackageId> {
         let name_lower = name.to_lowercase();
         let mut result = Vec::new();
 
@@ -314,50 +338,52 @@ impl Pool {
             }
         }
 
-        // Providers (provide/replace)
-        if let Some(ids) = self.providers.get(&name_lower) {
-            for &id in ids {
-                // Check if the provider constraint matches
-                // Handle both regular packages and alias packages
-                let provides_version = if let Some(entry) = self.entry(id) {
-                    match entry {
-                        PoolEntry::Package(pkg) => {
-                            pkg.provide.iter()
-                                .find(|(k, _)| k.to_lowercase() == name_lower)
-                                .map(|(_, v)| v.clone())
-                                .or_else(|| {
-                                    pkg.replace.iter()
-                                        .find(|(k, _)| k.to_lowercase() == name_lower)
-                                        .map(|(_, v)| v.clone())
-                                })
+        // Providers (provide/replace) - only include if requested
+        if include_providers {
+            if let Some(ids) = self.providers.get(&name_lower) {
+                for &id in ids {
+                    // Check if the provider constraint matches
+                    // Handle both regular packages and alias packages
+                    let provides_version = if let Some(entry) = self.entry(id) {
+                        match entry {
+                            PoolEntry::Package(pkg) => {
+                                pkg.provide.iter()
+                                    .find(|(k, _)| k.to_lowercase() == name_lower)
+                                    .map(|(_, v)| v.clone())
+                                    .or_else(|| {
+                                        pkg.replace.iter()
+                                            .find(|(k, _)| k.to_lowercase() == name_lower)
+                                            .map(|(_, v)| v.clone())
+                                    })
+                            }
+                            PoolEntry::Alias(alias) => {
+                                alias.provide().iter()
+                                    .find(|(k, _)| k.to_lowercase() == name_lower)
+                                    .map(|(_, v)| v.clone())
+                                    .or_else(|| {
+                                        alias.replace().iter()
+                                            .find(|(k, _)| k.to_lowercase() == name_lower)
+                                            .map(|(_, v)| v.clone())
+                                    })
+                            }
                         }
-                        PoolEntry::Alias(alias) => {
-                            alias.provide().iter()
-                                .find(|(k, _)| k.to_lowercase() == name_lower)
-                                .map(|(_, v)| v.clone())
-                                .or_else(|| {
-                                    alias.replace().iter()
-                                        .find(|(k, _)| k.to_lowercase() == name_lower)
-                                        .map(|(_, v)| v.clone())
-                                })
-                        }
-                    }
-                } else if let Some(pkg) = self.package(id) {
-                    pkg.provide.iter()
-                        .find(|(k, _)| k.to_lowercase() == name_lower)
-                        .map(|(_, v)| v.clone())
-                        .or_else(|| {
-                            pkg.replace.iter()
-                                .find(|(k, _)| k.to_lowercase() == name_lower)
-                                .map(|(_, v)| v.clone())
-                        })
-                } else {
-                    None
-                };
+                    } else if let Some(pkg) = self.package(id) {
+                        pkg.provide.iter()
+                            .find(|(k, _)| k.to_lowercase() == name_lower)
+                            .map(|(_, v)| v.clone())
+                            .or_else(|| {
+                                pkg.replace.iter()
+                                    .find(|(k, _)| k.to_lowercase() == name_lower)
+                                    .map(|(_, v)| v.clone())
+                            })
+                    } else {
+                        None
+                    };
 
-                if let Some(provided_version) = provides_version {
-                    if self.matches_provided_constraint(&provided_version, constraint) {
-                        result.push(id);
+                    if let Some(provided_version) = provides_version {
+                        if self.matches_provided_constraint(&provided_version, constraint) {
+                            result.push(id);
+                        }
                     }
                 }
             }
@@ -940,4 +966,5 @@ mod tests {
         assert_eq!(alias_entry.pretty_version(), "2.0.0");
         assert_eq!(alias_entry.name(), "vendor/package");
     }
+
 }
