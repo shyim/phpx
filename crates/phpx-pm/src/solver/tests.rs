@@ -1500,14 +1500,15 @@ fn test_learn_positive_literal() {
 /// B 2.0.10 and B 2.0.9 both require A==2.1.0.0-dev
 /// B 2.0.9 also replaces D==2.0.9.0
 ///
-/// Note: Composer's test expects failure due to stability filtering (default is 'stable'),
-/// but our solver doesn't filter by stability and correctly finds a valid solution:
-/// - A 2.1-dev, B 2.0.10, D 2.0.9, C 2.0-dev
+/// With minimum-stability: stable (default), dev packages are filtered out,
+/// so the solver cannot find a solution (matching Composer's behavior).
 #[test]
 fn test_issue_265() {
-    let mut pool = Pool::new();
+    // With default stability (stable), dev packages are filtered out
+    let mut pool = Pool::new(); // default is Stability::Stable
 
     // Use exact version strings from Composer test
+    // These dev packages will be filtered out due to minimum-stability: stable
     pool.add_package(Package::new("a", "2.0.999999-dev"));
     pool.add_package(Package::new("a", "2.1-dev"));
     pool.add_package(Package::new("a", "2.2-dev"));
@@ -1539,8 +1540,52 @@ fn test_issue_265() {
 
     let result = solver.solve(&request);
 
-    // Our solver finds a valid solution
-    assert!(result.is_ok(), "Solver should find a solution: {:?}", result.err());
+    // With minimum-stability: stable, C (a dev package) is filtered out,
+    // so the solver cannot find C and should fail
+    assert!(result.is_err(), "Should fail because C is a dev package and minimum-stability is stable");
+}
+
+/// Test that the solver works when minimum-stability allows dev packages
+#[test]
+fn test_issue_265_with_dev_stability() {
+    use crate::package::Stability;
+
+    // With minimum-stability: dev, all packages are allowed
+    let mut pool = Pool::with_minimum_stability(Stability::Dev);
+
+    pool.add_package(Package::new("a", "2.0.999999-dev"));
+    pool.add_package(Package::new("a", "2.1-dev"));
+    pool.add_package(Package::new("a", "2.2-dev"));
+
+    let mut pkg_b1 = Package::new("b", "2.0.10");
+    pkg_b1.require.insert("a".to_string(), "==2.1.0.0-dev".to_string());
+    pool.add_package(pkg_b1);
+
+    let mut pkg_b2 = Package::new("b", "2.0.9");
+    pkg_b2.require.insert("a".to_string(), "==2.1.0.0-dev".to_string());
+    pkg_b2.replace.insert("d".to_string(), "==2.0.9.0".to_string());
+    pool.add_package(pkg_b2);
+
+    let mut pkg_c = Package::new("c", "2.0-dev");
+    pkg_c.require.insert("a".to_string(), ">=2.0".to_string());
+    pkg_c.require.insert("d".to_string(), ">=2.0".to_string());
+    pool.add_package(pkg_c);
+
+    let mut pkg_d = Package::new("d", "2.0.9");
+    pkg_d.require.insert("a".to_string(), ">=2.1".to_string());
+    pkg_d.require.insert("b".to_string(), ">=2.0-dev".to_string());
+    pool.add_package(pkg_d);
+
+    let policy = Policy::new();
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("c", "==2.0.0.0-dev");
+
+    let result = solver.solve(&request);
+
+    // With minimum-stability: dev, solver should find a solution
+    assert!(result.is_ok(), "Solver should find a solution with dev stability: {:?}", result.err());
 
     let transaction = result.unwrap();
     let installs: Vec<_> = transaction.installs().collect();

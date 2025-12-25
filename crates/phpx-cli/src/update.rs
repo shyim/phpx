@@ -18,7 +18,7 @@ use phpx_pm::{
     repository::{ComposerRepository, RepositoryManager, get_head_commit},
     solver::{Pool, Policy, Request, Solver},
     Package,
-    package::{Autoload, AutoloadPath},
+    package::{Autoload, AutoloadPath, Stability},
 };
 
 use crate::pm::platform::PlatformInfo;
@@ -170,10 +170,30 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
     spinner.set_message("Detecting platform...");
     let platform = PlatformInfo::detect();
 
-    // Build package pool with transitive dependencies
-    let mut pool = Pool::new();
+    // Get minimum stability from composer.json (default: stable)
+    let minimum_stability: Stability = composer_json.minimum_stability
+        .parse()
+        .unwrap_or(Stability::Stable);
 
-    // Add platform packages first (php, ext-*)
+    // Build package pool with transitive dependencies
+    let mut pool = Pool::with_minimum_stability(minimum_stability);
+
+    // Add stability flags from composer.json for per-package overrides
+    // In composer.json, these are specified as: "vendor/package": "dev" in the require section
+    // with @dev, @alpha, @beta, @RC suffixes in constraints
+    // For now, we extract explicit stability flags from constraints like "package": "^1.0@dev"
+    for (name, constraint) in &composer_json.require {
+        if let Some(stability) = extract_stability_flag(constraint) {
+            pool.add_stability_flag(name, stability);
+        }
+    }
+    for (name, constraint) in &composer_json.require_dev {
+        if let Some(stability) = extract_stability_flag(constraint) {
+            pool.add_stability_flag(name, stability);
+        }
+    }
+
+    // Add platform packages first (php, ext-*) - these bypass stability filtering
     for pkg in platform.to_packages() {
         pool.add_package(pkg);
     }
@@ -657,6 +677,21 @@ fn compute_content_hash(json: &ComposerJson) -> String {
         v.hash(&mut hasher);
     }
     format!("{:x}", hasher.finish())
+}
+
+/// Extract stability flag from a version constraint.
+/// Examples: "^1.0@dev" -> Some(Stability::Dev), "^1.0" -> None
+fn extract_stability_flag(constraint: &str) -> Option<Stability> {
+    // Look for @stability suffix in constraint
+    if let Some(at_pos) = constraint.rfind('@') {
+        let stability_str = &constraint[at_pos + 1..];
+        let stability: Stability = stability_str.parse().ok()?;
+        // Only return if it's not the default stable
+        if stability != Stability::Stable {
+            return Some(stability);
+        }
+    }
+    None
 }
 
 mod dirs {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::cell::RefCell;
 
-use crate::package::{AliasPackage, Package};
+use crate::package::{AliasPackage, Package, Stability};
 use phpx_semver::{Constraint, ConstraintInterface, Operator, VersionParser};
 
 /// A literal represents a package decision in the SAT solver.
@@ -106,6 +106,13 @@ pub struct Pool {
 
     /// Maps alias package IDs to their base package IDs
     alias_map: HashMap<PackageId, PackageId>,
+
+    /// Minimum stability for packages (default: Stable)
+    minimum_stability: Stability,
+
+    /// Per-package stability overrides (package name -> stability)
+    /// Allows specific packages to have a lower stability than minimum_stability
+    stability_flags: HashMap<String, Stability>,
 }
 
 impl std::fmt::Debug for Pool {
@@ -117,13 +124,20 @@ impl std::fmt::Debug for Pool {
             .field("priorities", &self.priorities)
             .field("package_repos", &self.package_repos)
             .field("alias_map", &self.alias_map)
+            .field("minimum_stability", &self.minimum_stability)
+            .field("stability_flags", &self.stability_flags)
             .finish()
     }
 }
 
 impl Pool {
-    /// Create a new empty pool
+    /// Create a new empty pool with default stability (Stable)
     pub fn new() -> Self {
+        Self::with_minimum_stability(Stability::Stable)
+    }
+
+    /// Create a new pool with the specified minimum stability
+    pub fn with_minimum_stability(minimum_stability: Stability) -> Self {
         let placeholder = Arc::new(Package::new("__placeholder__", "0.0.0"));
         Self {
             entries: vec![PoolEntry::Package(Arc::clone(&placeholder))], // Index 0 placeholder
@@ -135,7 +149,43 @@ impl Pool {
             normalized_versions: RefCell::new(HashMap::new()),
             parsed_constraints: RefCell::new(HashMap::new()),
             alias_map: HashMap::new(),
+            minimum_stability,
+            stability_flags: HashMap::new(),
         }
+    }
+
+    /// Set the minimum stability for packages
+    pub fn set_minimum_stability(&mut self, stability: Stability) {
+        self.minimum_stability = stability;
+    }
+
+    /// Get the minimum stability
+    pub fn minimum_stability(&self) -> Stability {
+        self.minimum_stability
+    }
+
+    /// Add a stability flag for a specific package
+    pub fn add_stability_flag(&mut self, package_name: &str, stability: Stability) {
+        self.stability_flags.insert(package_name.to_lowercase(), stability);
+    }
+
+    /// Get the effective minimum stability for a package
+    /// Returns the package-specific flag if set, otherwise the global minimum_stability
+    fn get_effective_minimum_stability(&self, package_name: &str) -> Stability {
+        self.stability_flags
+            .get(&package_name.to_lowercase())
+            .copied()
+            .unwrap_or(self.minimum_stability)
+    }
+
+    /// Check if a package meets the stability requirements
+    fn meets_stability_requirement(&self, package: &Package) -> bool {
+        let pkg_stability = package.stability();
+        let min_stability = self.get_effective_minimum_stability(&package.name);
+
+        // Lower priority number = more stable
+        // Package stability must be at least as stable as minimum
+        pkg_stability.priority() <= min_stability.priority()
     }
 
     /// Create a pool builder for fluent construction
@@ -144,12 +194,19 @@ impl Pool {
     }
 
     /// Add a package to the pool, returning its ID
+    /// Returns None if the package doesn't meet stability requirements
     pub fn add_package(&mut self, package: Package) -> PackageId {
         self.add_package_from_repo(package, None)
     }
 
     /// Add a package to the pool from a specific repository, returning its ID
+    /// Returns 0 if the package doesn't meet stability requirements (filtered out)
     pub fn add_package_from_repo(&mut self, package: Package, repo_name: Option<&str>) -> PackageId {
+        // Check stability requirements
+        if !self.meets_stability_requirement(&package) {
+            return 0; // Package filtered out due to stability
+        }
+
         let id = self.packages.len() as PackageId;
         let name = package.name.to_lowercase();
 
@@ -619,6 +676,25 @@ impl PoolBuilder {
         }
     }
 
+    /// Create a new pool builder with specified minimum stability
+    pub fn with_minimum_stability(minimum_stability: Stability) -> Self {
+        Self {
+            pool: Pool::with_minimum_stability(minimum_stability),
+        }
+    }
+
+    /// Set the minimum stability for the pool
+    pub fn minimum_stability(mut self, stability: Stability) -> Self {
+        self.pool.set_minimum_stability(stability);
+        self
+    }
+
+    /// Add a stability flag for a specific package
+    pub fn stability_flag(mut self, package_name: &str, stability: Stability) -> Self {
+        self.pool.add_stability_flag(package_name, stability);
+        self
+    }
+
     /// Add a package to the pool
     pub fn add_package(mut self, package: Package) -> Self {
         self.pool.add_package(package);
@@ -859,7 +935,8 @@ mod tests {
 
     #[test]
     fn test_pool_add_alias() {
-        let mut pool = Pool::new();
+        // Use dev stability since base package is a dev version
+        let mut pool = Pool::with_minimum_stability(Stability::Dev);
 
         // Add base package
         let base_pkg = Package::new("vendor/package", "dev-main");
@@ -885,7 +962,8 @@ mod tests {
 
     #[test]
     fn test_pool_alias_what_provides() {
-        let mut pool = Pool::new();
+        // Use dev stability since base package is a dev version
+        let mut pool = Pool::with_minimum_stability(Stability::Dev);
 
         // Add base package with dev version
         let base_pkg = Package::new("vendor/package", "dev-main");
@@ -942,7 +1020,8 @@ mod tests {
 
     #[test]
     fn test_pool_entry_version() {
-        let mut pool = Pool::new();
+        // Use dev stability since base package is a dev version
+        let mut pool = Pool::with_minimum_stability(Stability::Dev);
 
         // Add base package
         let base_pkg = Package::new("vendor/package", "dev-main");
@@ -965,6 +1044,123 @@ mod tests {
         assert_eq!(alias_entry.version(), "2.0.0.0");
         assert_eq!(alias_entry.pretty_version(), "2.0.0");
         assert_eq!(alias_entry.name(), "vendor/package");
+    }
+
+    #[test]
+    fn test_minimum_stability_default() {
+        let pool = Pool::new();
+        assert_eq!(pool.minimum_stability(), Stability::Stable);
+    }
+
+    #[test]
+    fn test_minimum_stability_filtering() {
+        // With default stability (stable), dev packages are filtered out
+        let mut pool = Pool::new();
+
+        // Stable package should be added
+        let id1 = pool.add_package(Package::new("vendor/pkg", "1.0.0"));
+        assert_ne!(id1, 0, "Stable package should be added");
+
+        // Dev package should be filtered out
+        let id2 = pool.add_package(Package::new("vendor/pkg", "2.0.0-dev"));
+        assert_eq!(id2, 0, "Dev package should be filtered out");
+
+        // Alpha package should be filtered out
+        let id3 = pool.add_package(Package::new("vendor/pkg", "3.0.0-alpha1"));
+        assert_eq!(id3, 0, "Alpha package should be filtered out");
+
+        // Beta package should be filtered out
+        let id4 = pool.add_package(Package::new("vendor/pkg", "3.0.0-beta1"));
+        assert_eq!(id4, 0, "Beta package should be filtered out");
+
+        // RC package should be filtered out
+        let id5 = pool.add_package(Package::new("vendor/pkg", "3.0.0-RC1"));
+        assert_eq!(id5, 0, "RC package should be filtered out");
+
+        // Only 1 package should be in the pool
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn test_minimum_stability_dev() {
+        // With dev stability, all packages are allowed
+        let mut pool = Pool::with_minimum_stability(Stability::Dev);
+
+        pool.add_package(Package::new("vendor/pkg", "1.0.0"));
+        pool.add_package(Package::new("vendor/pkg", "2.0.0-dev"));
+        pool.add_package(Package::new("vendor/pkg", "3.0.0-alpha1"));
+        pool.add_package(Package::new("vendor/pkg", "3.0.0-beta1"));
+        pool.add_package(Package::new("vendor/pkg", "3.0.0-RC1"));
+
+        // All 5 packages should be in the pool
+        assert_eq!(pool.len(), 5);
+    }
+
+    #[test]
+    fn test_minimum_stability_beta() {
+        // With beta stability, beta/RC/stable are allowed
+        let mut pool = Pool::with_minimum_stability(Stability::Beta);
+
+        let id1 = pool.add_package(Package::new("vendor/pkg", "1.0.0"));
+        assert_ne!(id1, 0, "Stable should be allowed");
+
+        let id2 = pool.add_package(Package::new("vendor/pkg", "2.0.0-dev"));
+        assert_eq!(id2, 0, "Dev should be filtered out");
+
+        let id3 = pool.add_package(Package::new("vendor/pkg", "3.0.0-alpha1"));
+        assert_eq!(id3, 0, "Alpha should be filtered out");
+
+        let id4 = pool.add_package(Package::new("vendor/pkg", "3.0.0-beta1"));
+        assert_ne!(id4, 0, "Beta should be allowed");
+
+        let id5 = pool.add_package(Package::new("vendor/pkg", "3.0.0-RC1"));
+        assert_ne!(id5, 0, "RC should be allowed");
+
+        assert_eq!(pool.len(), 3);
+    }
+
+    #[test]
+    fn test_stability_flags_override() {
+        // With stable minimum, but dev flag for specific package
+        let mut pool = Pool::new();
+        pool.add_stability_flag("vendor/dev-pkg", Stability::Dev);
+
+        // Regular dev package should be filtered
+        let id1 = pool.add_package(Package::new("vendor/other", "1.0.0-dev"));
+        assert_eq!(id1, 0, "Dev package without flag should be filtered");
+
+        // Package with dev stability flag should be allowed
+        let id2 = pool.add_package(Package::new("vendor/dev-pkg", "1.0.0-dev"));
+        assert_ne!(id2, 0, "Dev package with flag should be allowed");
+
+        // Stable packages should still work
+        let id3 = pool.add_package(Package::new("vendor/stable", "1.0.0"));
+        assert_ne!(id3, 0, "Stable package should be allowed");
+
+        assert_eq!(pool.len(), 2);
+    }
+
+    #[test]
+    fn test_pool_builder_with_stability() {
+        let pool = PoolBuilder::with_minimum_stability(Stability::Dev)
+            .add_package(Package::new("vendor/pkg", "1.0.0-dev"))
+            .add_package(Package::new("vendor/pkg", "2.0.0"))
+            .build();
+
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool.minimum_stability(), Stability::Dev);
+    }
+
+    #[test]
+    fn test_pool_builder_stability_flag() {
+        let pool = PoolBuilder::new()
+            .stability_flag("vendor/dev-allowed", Stability::Dev)
+            .add_package(Package::new("vendor/dev-allowed", "1.0.0-dev"))
+            .add_package(Package::new("vendor/other", "1.0.0-dev")) // filtered
+            .add_package(Package::new("vendor/stable", "1.0.0"))
+            .build();
+
+        assert_eq!(pool.len(), 2);
     }
 
 }

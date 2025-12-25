@@ -47,11 +47,31 @@ impl Stability {
             Stability::Stable
         }
     }
+
+    /// Parse stability from a string (e.g., from composer.json minimum-stability)
+    fn parse_stability(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "dev" => Stability::Dev,
+            "alpha" => Stability::Alpha,
+            "beta" => Stability::Beta,
+            "rc" => Stability::RC,
+            "stable" | "" => Stability::Stable,
+            _ => Stability::Stable, // Default to stable for unknown values
+        }
+    }
 }
 
 impl Default for Stability {
     fn default() -> Self {
         Stability::Stable
+    }
+}
+
+impl std::str::FromStr for Stability {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Stability::parse_stability(s))
     }
 }
 
@@ -603,6 +623,21 @@ mod tests {
         assert!(Stability::RC.priority() < Stability::Beta.priority());
         assert!(Stability::Beta.priority() < Stability::Alpha.priority());
         assert!(Stability::Alpha.priority() < Stability::Dev.priority());
+    }
+
+    #[test]
+    fn test_stability_from_str() {
+        use std::str::FromStr;
+
+        assert_eq!(Stability::from_str("dev").unwrap(), Stability::Dev);
+        assert_eq!(Stability::from_str("alpha").unwrap(), Stability::Alpha);
+        assert_eq!(Stability::from_str("beta").unwrap(), Stability::Beta);
+        assert_eq!(Stability::from_str("rc").unwrap(), Stability::RC);
+        assert_eq!(Stability::from_str("RC").unwrap(), Stability::RC);
+        assert_eq!(Stability::from_str("stable").unwrap(), Stability::Stable);
+        assert_eq!(Stability::from_str("STABLE").unwrap(), Stability::Stable);
+        assert_eq!(Stability::from_str("").unwrap(), Stability::Stable);
+        assert_eq!(Stability::from_str("unknown").unwrap(), Stability::Stable);
     }
 
     #[test]
