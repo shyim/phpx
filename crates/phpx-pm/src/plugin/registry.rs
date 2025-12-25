@@ -7,6 +7,7 @@ use crate::package::Package;
 use crate::Result;
 
 use super::composer_bin::ComposerBinPlugin;
+use super::phpstan_extension_installer::PhpstanExtensionInstallerPlugin;
 use super::symfony_runtime::SymfonyRuntimePlugin;
 
 /// Registry of ported Composer plugins.
@@ -39,6 +40,7 @@ impl PluginRegistry {
         Self {
             plugins: vec![
                 Box::new(ComposerBinPlugin),
+                Box::new(PhpstanExtensionInstallerPlugin),
                 Box::new(SymfonyRuntimePlugin),
             ],
         }

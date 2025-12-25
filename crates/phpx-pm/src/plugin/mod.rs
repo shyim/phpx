@@ -6,6 +6,7 @@
 //! ported and registered here.
 
 mod composer_bin;
+mod phpstan_extension_installer;
 mod registry;
 mod symfony_runtime;
 
