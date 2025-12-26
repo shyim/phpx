@@ -203,6 +203,13 @@ impl Pool {
         self.add_package_from_repo(package, None)
     }
 
+    /// Add a platform package to the pool, bypassing stability filtering.
+    /// Platform packages (php, ext-*, lib-*) are fixed system packages and should
+    /// always be added regardless of stability requirements.
+    pub fn add_platform_package(&mut self, package: Package) -> PackageId {
+        self.add_package_arc_internal(Arc::new(package), None, true)
+    }
+
     /// Add a package to the pool from a specific repository, returning its ID
     /// Returns 0 if the package doesn't meet stability requirements (filtered out)
     pub fn add_package_from_repo(&mut self, package: Package, repo_name: Option<&str>) -> PackageId {
@@ -212,8 +219,19 @@ impl Pool {
     /// Add an existing package (Arc) to the pool from a specific repository, returning its ID
     /// This avoids deep cloning the package data
     pub fn add_package_arc(&mut self, package: Arc<Package>, repo_name: Option<&str>) -> PackageId {
-        // Check stability requirements
-        if !self.meets_stability_requirement(&package) {
+        self.add_package_arc_internal(package, repo_name, false)
+    }
+
+    /// Add an existing package (Arc) bypassing stability filtering.
+    /// Used by pool optimizer when copying platform packages to a new pool.
+    pub fn add_package_arc_bypass_stability(&mut self, package: Arc<Package>, repo_name: Option<&str>) -> PackageId {
+        self.add_package_arc_internal(package, repo_name, true)
+    }
+
+    /// Internal method for adding packages with optional stability check bypass
+    fn add_package_arc_internal(&mut self, package: Arc<Package>, repo_name: Option<&str>, skip_stability_check: bool) -> PackageId {
+        // Check stability requirements (unless bypassed for platform packages)
+        if !skip_stability_check && !self.meets_stability_requirement(&package) {
             return 0; // Package filtered out due to stability
         }
 
@@ -1294,3 +1312,43 @@ mod tests {
     }
 
 }
+
+    #[test]
+    fn test_platform_package_dev_version_matching() {
+        // Use dev stability to accept the dev version
+        let mut pool = Pool::with_minimum_stability(Stability::Dev);
+        
+        // Add PHP 8.5.1-dev as a platform package
+        pool.add_platform_package(Package::new("php", "8.5.1-dev"));
+        
+        eprintln!("Pool len: {}", pool.len());
+        eprintln!("Package 1 version: {:?}", pool.package(1).map(|p| &p.version));
+        
+        // Test what_provides with >=8.2 - should find the PHP package
+        let matches = pool.what_provides("php", Some(">=8.2"));
+        eprintln!("what_provides('php', '>=8.2'): {:?}", matches);
+        
+        assert_eq!(matches.len(), 1, "PHP 8.5.1-dev should match >=8.2");
+        assert_eq!(pool.package(matches[0]).unwrap().version, "8.5.1-dev");
+    }
+
+    #[test]
+    fn test_platform_package_matching_without_dev_stability() {
+        // Use default stability (stable) to match what installer uses
+        let mut pool = Pool::new();
+        
+        // Add PHP 8.5.1-dev as a platform package (using add_platform_package)
+        let id = pool.add_platform_package(Package::new("php", "8.5.1-dev"));
+        eprintln!("Platform package ID: {}", id);
+        eprintln!("Pool len: {}", pool.len());
+        
+        // Check the package is in the pool
+        let pkg = pool.package(id);
+        eprintln!("Package: {:?}", pkg.map(|p| (&p.name, &p.version)));
+        
+        // Test what_provides with >=8.2 - should find the PHP package
+        let matches = pool.what_provides("php", Some(">=8.2"));
+        eprintln!("what_provides('php', '>=8.2'): {:?}", matches);
+        
+        assert_eq!(matches.len(), 1, "PHP 8.5.1-dev should match >=8.2 even with default (stable) pool");
+    }

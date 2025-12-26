@@ -20,6 +20,7 @@ use super::policy::Policy;
 use super::pool::{Pool, PoolEntry, PackageId};
 use super::request::Request;
 use crate::package::Package;
+use crate::util::is_platform_package;
 
 /// Optimizes a Pool by removing unnecessary packages before solving.
 ///
@@ -623,10 +624,19 @@ impl<'a> PoolOptimizer<'a> {
                         let repo_name = original_pool.get_repository(id);
                         let priority = original_pool.get_priority_by_id(id);
 
-                        new_pool.add_package_arc(
-                            Arc::clone(pkg),
-                            repo_name,
-                        );
+                        // Platform packages should bypass stability filtering
+                        // as they are fixed system packages
+                        if is_platform_package(&pkg.name) {
+                            new_pool.add_package_arc_bypass_stability(
+                                Arc::clone(pkg),
+                                repo_name,
+                            );
+                        } else {
+                            new_pool.add_package_arc(
+                                Arc::clone(pkg),
+                                repo_name,
+                            );
+                        }
 
                         // Preserve priority
                         if let Some(repo) = repo_name {

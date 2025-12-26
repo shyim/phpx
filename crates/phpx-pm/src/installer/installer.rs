@@ -13,6 +13,7 @@ use crate::autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload, RootPa
 use crate::plugin::PluginRegistry;
 use crate::scripts;
 use crate::package::{Dist, Source};
+use crate::util::is_platform_package;
 
 pub struct Installer {
     composer: Composer,
@@ -71,9 +72,9 @@ impl Installer {
             }
         }
 
-        // Add platform packages
+        // Add platform packages (bypass stability filtering - these are fixed system packages)
         for pkg in platform_packages {
-            pool.add_package(pkg);
+            pool.add_platform_package(pkg);
         }
 
         // Load packages
@@ -500,10 +501,6 @@ fn locked_package_to_package(lp: &LockedPackage) -> Package {
         pkg.dist = Some(d);
     }
     pkg
-}
-
-fn is_platform_package(name: &str) -> bool {
-    name == "php" || name.starts_with("ext-") || name.starts_with("lib-")
 }
 
 fn extract_stability_flag(constraint: &str) -> Option<Stability> {

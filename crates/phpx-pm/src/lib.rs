@@ -10,7 +10,9 @@ pub mod json;
 pub mod package;
 pub mod plugin;
 pub mod repository;
+pub mod scripts;
 pub mod solver;
+pub mod util;
 
 pub use error::{ComposerError, Result};
 pub use package::Package;
@@ -22,4 +24,4 @@ pub use installer::{InstallationManager, InstallConfig};
 pub use autoload::{AutoloadGenerator, AutoloadConfig};
 pub use plugin::PluginRegistry;
 pub use composer::Composer;
-pub mod scripts;
+pub use util::is_platform_package;
