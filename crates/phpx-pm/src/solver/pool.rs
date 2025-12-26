@@ -1320,13 +1320,9 @@ mod tests {
         
         // Add PHP 8.5.1-dev as a platform package
         pool.add_platform_package(Package::new("php", "8.5.1-dev"));
-        
-        eprintln!("Pool len: {}", pool.len());
-        eprintln!("Package 1 version: {:?}", pool.package(1).map(|p| &p.version));
-        
+
         // Test what_provides with >=8.2 - should find the PHP package
         let matches = pool.what_provides("php", Some(">=8.2"));
-        eprintln!("what_provides('php', '>=8.2'): {:?}", matches);
         
         assert_eq!(matches.len(), 1, "PHP 8.5.1-dev should match >=8.2");
         assert_eq!(pool.package(matches[0]).unwrap().version, "8.5.1-dev");
@@ -1339,16 +1335,13 @@ mod tests {
         
         // Add PHP 8.5.1-dev as a platform package (using add_platform_package)
         let id = pool.add_platform_package(Package::new("php", "8.5.1-dev"));
-        eprintln!("Platform package ID: {}", id);
-        eprintln!("Pool len: {}", pool.len());
-        
+
         // Check the package is in the pool
         let pkg = pool.package(id);
-        eprintln!("Package: {:?}", pkg.map(|p| (&p.name, &p.version)));
-        
+        assert!(pkg.is_some());
+
         // Test what_provides with >=8.2 - should find the PHP package
         let matches = pool.what_provides("php", Some(">=8.2"));
-        eprintln!("what_provides('php', '>=8.2'): {:?}", matches);
         
         assert_eq!(matches.len(), 1, "PHP 8.5.1-dev should match >=8.2 even with default (stable) pool");
     }

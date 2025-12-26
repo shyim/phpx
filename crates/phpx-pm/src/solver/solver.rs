@@ -47,12 +47,9 @@ impl<'a> Solver<'a> {
     /// Returns a Transaction on success, or a ProblemSet explaining failures.
     pub fn solve(&self, request: &Request) -> Result<Transaction, ProblemSet> {
         if self.optimize_pool {
-            let opt_start = std::time::Instant::now();
             // Optimize the pool first to reduce the search space
             let mut optimizer = PoolOptimizer::new(self.policy);
             let optimized_pool = optimizer.optimize(request, self.pool);
-            eprintln!("[SOLVER] Pool optimization: {:?}, {} -> {} packages",
-                opt_start.elapsed(), self.pool.len(), optimized_pool.len());
             self.solve_with_pool(&optimized_pool, request)
         } else {
             self.solve_with_pool(self.pool, request)
@@ -61,32 +58,20 @@ impl<'a> Solver<'a> {
 
     /// Internal solve method that works with any pool reference.
     fn solve_with_pool(&self, pool: &Pool, request: &Request) -> Result<Transaction, ProblemSet> {
-        let start = std::time::Instant::now();
-
         // Generate rules from the dependency graph
         let generator = RuleGenerator::new(pool);
         let rules = generator.generate(request);
 
-        eprintln!("[SOLVER] Rule generation: {:?}, {} rules", start.elapsed(), rules.len());
-        let rule_start = std::time::Instant::now();
-
         // Create solver state
         let mut state = SolverState::new(rules);
-
-        eprintln!("[SOLVER] State creation: {:?}", rule_start.elapsed());
-        let sat_start = std::time::Instant::now();
 
         // Run the SAT solver
         match self.run_sat(&mut state, pool, request) {
             Ok(()) => {
-                eprintln!("[SOLVER] SAT solving: {:?}", sat_start.elapsed());
                 // Build transaction from decisions
                 Ok(self.build_transaction(&state, pool, request))
             }
-            Err(problems) => {
-                eprintln!("[SOLVER] SAT solving (failed): {:?}", sat_start.elapsed());
-                Err(problems)
-            },
+            Err(problems) => Err(problems),
         }
     }
 

@@ -51,11 +51,13 @@ pub fn validate_composer_json(json: &ComposerJson) -> Result<(), Vec<String>> {
 
     // Minimum stability validation
     let valid_stabilities = ["dev", "alpha", "beta", "rc", "stable"];
-    if !valid_stabilities.contains(&json.minimum_stability.to_lowercase().as_str()) {
-        errors.push(format!(
-            "Invalid minimum-stability '{}'. Must be one of: {:?}",
-            json.minimum_stability, valid_stabilities
-        ));
+    if let Some(ref min_stability) = json.minimum_stability {
+        if !valid_stabilities.contains(&min_stability.to_lowercase().as_str()) {
+            errors.push(format!(
+                "Invalid minimum-stability '{}'. Must be one of: {:?}",
+                min_stability, valid_stabilities
+            ));
+        }
     }
 
     // Type validation
@@ -173,7 +175,7 @@ mod tests {
     fn test_validate_composer_json() {
         let mut json = ComposerJson::default();
         json.name = Some("vendor/package".to_string());
-        json.minimum_stability = "stable".to_string();
+        json.minimum_stability = Some("stable".to_string());
 
         assert!(validate_composer_json(&json).is_ok());
 

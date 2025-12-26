@@ -25,3 +25,4 @@ pub use autoload::{AutoloadGenerator, AutoloadConfig};
 pub use plugin::PluginRegistry;
 pub use composer::Composer;
 pub use util::is_platform_package;
+#[cfg(test)] mod test_content_hash;

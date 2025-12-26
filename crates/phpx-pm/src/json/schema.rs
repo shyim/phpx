@@ -94,12 +94,12 @@ pub struct ComposerJson {
     pub target_dir: Option<String>,
 
     /// Minimum stability for dependencies
-    #[serde(default = "default_minimum_stability", skip_serializing_if = "is_default_stability")]
-    pub minimum_stability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum_stability: Option<String>,
 
     /// Prefer stable versions
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub prefer_stable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer_stable: Option<bool>,
 
     /// Repository definitions
     #[serde(default, skip_serializing_if = "Repositories::is_none")]
@@ -166,22 +166,6 @@ fn default_type() -> String {
 
 fn is_default_type(t: &String) -> bool {
     t == "library"
-}
-
-fn default_minimum_stability() -> String {
-    "stable".to_string()
-}
-
-fn is_default_stability(s: &String) -> bool {
-    s == "stable"
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn is_true(b: &bool) -> bool {
-    *b
 }
 
 fn is_null_value(v: &serde_json::Value) -> bool {
