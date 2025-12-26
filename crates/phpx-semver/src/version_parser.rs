@@ -144,6 +144,280 @@ lazy_static! {
     static ref BASIC_COMPARATOR_RE: Regex = Regex::new(r"^(<>|!=|>=?|<=?|==?)?\s*(.*)").unwrap();
 }
 
+fn fast_normalize_simple(version: &str) -> Option<String> {
+    let bytes = version.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let plus_pos = bytes.iter().position(|&b| b == b'+');
+    let end = plus_pos.unwrap_or(bytes.len());
+
+    if end == 0 {
+        return None;
+    }
+
+    for &b in &bytes[..end] {
+        if b.is_ascii_whitespace() || b == b'#' || b == b'@' || b == b'/' || b == b'*' || b == b'x' || b == b'X' {
+            return None;
+        }
+    }
+
+    if let Some(pos) = plus_pos {
+        let meta = &bytes[pos + 1..];
+        if meta.is_empty() {
+            return None;
+        }
+        for &b in meta {
+            if b.is_ascii_whitespace() || b == b',' || b == b'+' {
+                return None;
+            }
+        }
+    }
+
+    let slice = &version[..end];
+    let slice_bytes = slice.as_bytes();
+
+    let mut index = 0;
+    if slice_bytes[0] == b'v' || slice_bytes[0] == b'V' {
+        index = 1;
+        if index >= slice_bytes.len() {
+            return None;
+        }
+    }
+
+    let mut parts: Vec<(usize, usize)> = Vec::with_capacity(4);
+    let mut part_start = index;
+    let mut pos = index;
+
+    while pos < slice_bytes.len() {
+        let b = slice_bytes[pos];
+        if b == b'.' {
+            if part_start == pos {
+                return None;
+            }
+            parts.push((part_start, pos));
+            if parts.len() > 4 {
+                return None;
+            }
+            part_start = pos + 1;
+            pos += 1;
+            continue;
+        }
+        if !b.is_ascii_digit() {
+            break;
+        }
+        pos += 1;
+    }
+
+    if part_start == pos {
+        return None;
+    }
+    parts.push((part_start, pos));
+    if parts.len() > 4 {
+        return None;
+    }
+    if let Some((start, end)) = parts.first() {
+        if end - start > 5 {
+            return None;
+        }
+    }
+
+    let mut rest = &slice[pos..];
+    let mut dev_suffix = false;
+    let mut stability = None;
+    let mut stability_raw = "";
+    let mut stability_digits = "";
+
+    if !rest.is_empty() {
+        let mut leading_sep = None;
+        if let Some(&first) = rest.as_bytes().first() {
+            if first == b'.' || first == b'-' || first == b'_' {
+                leading_sep = Some(first);
+                rest = &rest[1..];
+            }
+        }
+
+        if rest.is_empty() {
+            return None;
+        }
+
+        if ci_starts_with(rest, "dev") {
+            if rest.len() != 3 {
+                return None;
+            }
+            if leading_sep == Some(b'_') {
+                return None;
+            }
+            dev_suffix = true;
+        } else if let Some((kind, len)) = match_stability(rest) {
+            stability = Some(kind);
+            stability_raw = &rest[..len];
+            rest = &rest[len..];
+
+            let mut digits_rest = rest;
+            while digits_rest.starts_with('.') || digits_rest.starts_with('-') {
+                digits_rest = &digits_rest[1..];
+            }
+
+            let mut i = 0;
+            let bytes = digits_rest.as_bytes();
+            let mut saw_digit = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b.is_ascii_digit() {
+                    saw_digit = true;
+                    i += 1;
+                    continue;
+                }
+                if b == b'.' || b == b'-' {
+                    if !saw_digit {
+                        return None;
+                    }
+                    if i + 1 >= bytes.len() || !bytes[i + 1].is_ascii_digit() {
+                        break;
+                    }
+                    i += 1;
+                    continue;
+                }
+                break;
+            }
+
+            stability_digits = &digits_rest[..i];
+            rest = &digits_rest[i..];
+
+            if !rest.is_empty() {
+                let mut tail = rest;
+                if let Some(&first) = tail.as_bytes().first() {
+                    if first == b'.' || first == b'-' {
+                        tail = &tail[1..];
+                    } else if first == b'_' {
+                        return None;
+                    }
+                }
+
+                if ci_starts_with(tail, "dev") && tail.len() == 3 {
+                    dev_suffix = true;
+                } else {
+                    return None;
+                }
+            }
+        } else {
+            return None;
+        }
+    }
+
+    let mut normalized = build_simple_numeric(slice, &parts);
+
+    if let Some(kind) = stability {
+        if kind == StabilityKind::Stable && stability_raw == "stable" {
+            return Some(normalized);
+        }
+
+        normalized.push('-');
+        normalized.push_str(stability_name(kind, stability_raw));
+        if !stability_digits.is_empty() {
+            normalized.push_str(stability_digits);
+        }
+    }
+
+    if dev_suffix {
+        normalized.push_str("-dev");
+    }
+
+    Some(normalized)
+}
+
+fn build_simple_numeric(version: &str, parts: &[(usize, usize)]) -> String {
+    let mut total_len = 3 + (4 - parts.len());
+    for (start, end) in parts {
+        total_len += end - start;
+    }
+
+    let mut normalized = String::with_capacity(total_len);
+    for i in 0..4 {
+        if i > 0 {
+            normalized.push('.');
+        }
+        if let Some((start, end)) = parts.get(i) {
+            normalized.push_str(&version[*start..*end]);
+        } else {
+            normalized.push('0');
+        }
+    }
+    normalized
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StabilityKind {
+    Stable,
+    Alpha,
+    Beta,
+    RC,
+    Patch,
+}
+
+fn match_stability(s: &str) -> Option<(StabilityKind, usize)> {
+    if ci_starts_with(s, "stable") {
+        return Some((StabilityKind::Stable, 6));
+    }
+    if ci_starts_with(s, "alpha") {
+        return Some((StabilityKind::Alpha, 5));
+    }
+    if ci_starts_with(s, "beta") {
+        return Some((StabilityKind::Beta, 4));
+    }
+    if ci_starts_with(s, "patch") {
+        return Some((StabilityKind::Patch, 5));
+    }
+    if ci_starts_with(s, "rc") {
+        return Some((StabilityKind::RC, 2));
+    }
+    if ci_starts_with(s, "pl") {
+        return Some((StabilityKind::Patch, 2));
+    }
+    if ci_starts_with(s, "a") {
+        return Some((StabilityKind::Alpha, 1));
+    }
+    if ci_starts_with(s, "b") {
+        return Some((StabilityKind::Beta, 1));
+    }
+    if ci_starts_with(s, "p") {
+        return Some((StabilityKind::Patch, 1));
+    }
+    None
+}
+
+fn stability_name(kind: StabilityKind, raw: &str) -> &'static str {
+    match kind {
+        StabilityKind::Stable => "stable",
+        StabilityKind::Alpha => "alpha",
+        StabilityKind::Beta => "beta",
+        StabilityKind::RC => "RC",
+        StabilityKind::Patch => {
+            if raw.eq_ignore_ascii_case("pl") || raw.eq_ignore_ascii_case("p") {
+                "patch"
+            } else {
+                "patch"
+            }
+        }
+    }
+}
+
+fn ci_starts_with(s: &str, prefix: &str) -> bool {
+    let s_bytes = s.as_bytes();
+    let p_bytes = prefix.as_bytes();
+    if s_bytes.len() < p_bytes.len() {
+        return false;
+    }
+    for i in 0..p_bytes.len() {
+        if !s_bytes[i].eq_ignore_ascii_case(&p_bytes[i]) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Version parser for normalizing and parsing version strings
 pub struct VersionParser;
 
@@ -226,6 +500,10 @@ impl VersionParser {
 
         if version.is_empty() {
             return Err(VersionParserError::InvalidVersion(orig_version.to_string()));
+        }
+
+        if let Some(normalized) = fast_normalize_simple(version) {
+            return Ok(normalized);
         }
 
         // Strip off aliasing
@@ -899,6 +1177,37 @@ impl VersionParser {
         }
 
         Ok(format!("{}.{}.{}.{}", parts[0], parts[1], parts[2], parts[3]))
+    }
+
+    /// Parse constraints and return a reusable, pre-parsed representation.
+    pub fn parse_constraints_cached(&self, constraints: &str) -> Result<ParsedConstraints, VersionParserError> {
+        let parsed = self.parse_constraints(constraints)?;
+        Ok(ParsedConstraints { constraints: parsed })
+    }
+}
+
+/// Reusable, pre-parsed constraints for repeated checks.
+pub struct ParsedConstraints {
+    constraints: Box<dyn ConstraintInterface>,
+}
+
+impl ParsedConstraints {
+    /// Check a normalized version string against the parsed constraints.
+    pub fn matches_normalized(&self, normalized_version: &str) -> bool {
+        match Constraint::new(Operator::Equal, normalized_version.to_string()) {
+            Ok(provider) => self.constraints.matches(&provider),
+            Err(_) => false,
+        }
+    }
+
+    /// Normalize the version and check against the parsed constraints.
+    pub fn satisfies(&self, version: &str) -> bool {
+        let parser = VersionParser::new();
+        let normalized = match parser.normalize(version) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        self.matches_normalized(&normalized)
     }
 }
 

@@ -282,100 +282,162 @@ pub fn php_version_compare(a: &str, b: &str, operator: &str) -> bool {
 
 /// Compare two version strings (PHP version_compare compatible)
 fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_parts = split_version(a);
-    let b_parts = split_version(b);
+    let mut a_iter = PartIter::new(a);
+    let mut b_iter = PartIter::new(b);
 
-    let max_len = std::cmp::max(a_parts.len(), b_parts.len());
+    loop {
+        let a_part = a_iter.next();
+        let b_part = b_iter.next();
 
-    for i in 0..max_len {
-        let a_part = a_parts.get(i).map(|s| s.as_str()).unwrap_or("");
-        let b_part = b_parts.get(i).map(|s| s.as_str()).unwrap_or("");
+        if a_part.is_none() && b_part.is_none() {
+            return std::cmp::Ordering::Equal;
+        }
+
+        let a_part = match a_part {
+            Some(part) => part,
+            None => Part::empty(),
+        };
+        let b_part = match b_part {
+            Some(part) => part,
+            None => Part::empty(),
+        };
 
         let cmp = compare_part(a_part, b_part);
         if cmp != std::cmp::Ordering::Equal {
             return cmp;
         }
     }
-
-    std::cmp::Ordering::Equal
 }
 
-fn split_version(version: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut prev_type: Option<CharType> = None;
-
-    for c in version.chars() {
-        let current_type = if c.is_ascii_digit() {
-            CharType::Digit
-        } else if c.is_alphabetic() {
-            CharType::Alpha
-        } else {
-            CharType::Separator
-        };
-
-        if current_type == CharType::Separator {
-            if !current.is_empty() {
-                parts.push(current.clone());
-                current.clear();
-            }
-            prev_type = None;
-            continue;
-        }
-
-        if prev_type.is_some() && prev_type != Some(current_type) {
-            if !current.is_empty() {
-                parts.push(current.clone());
-                current.clear();
-            }
-        }
-
-        current.push(c);
-        prev_type = Some(current_type);
-    }
-
-    if !current.is_empty() {
-        parts.push(current);
-    }
-
-    parts
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum CharType {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PartKind {
     Digit,
     Alpha,
-    Separator,
 }
 
-fn compare_part(a: &str, b: &str) -> std::cmp::Ordering {
-    // Check if both are numeric
-    let a_num = a.parse::<i64>();
-    let b_num = b.parse::<i64>();
+#[derive(Clone, Copy)]
+struct Part<'a> {
+    kind: PartKind,
+    text: &'a str,
+}
+
+impl<'a> Part<'a> {
+    fn empty() -> Part<'static> {
+        Part {
+            kind: PartKind::Alpha,
+            text: "",
+        }
+    }
+}
+
+struct PartIter<'a> {
+    input: &'a str,
+    bytes: &'a [u8],
+    index: usize,
+}
+
+impl<'a> PartIter<'a> {
+    fn new(input: &'a str) -> Self {
+        PartIter {
+            input,
+            bytes: input.as_bytes(),
+            index: 0,
+        }
+    }
+
+    fn next(&mut self) -> Option<Part<'a>> {
+        let len = self.bytes.len();
+        while self.index < len && !self.bytes[self.index].is_ascii_alphanumeric() {
+            self.index += 1;
+        }
+        if self.index >= len {
+            return None;
+        }
+
+        let start = self.index;
+        let is_digit = self.bytes[self.index].is_ascii_digit();
+        self.index += 1;
+
+        while self.index < len {
+            let b = self.bytes[self.index];
+            if is_digit {
+                if b.is_ascii_digit() {
+                    self.index += 1;
+                    continue;
+                }
+            } else if b.is_ascii_alphabetic() {
+                self.index += 1;
+                continue;
+            }
+            break;
+        }
+
+        Some(Part {
+            kind: if is_digit { PartKind::Digit } else { PartKind::Alpha },
+            text: &self.input[start..self.index],
+        })
+    }
+}
+
+fn compare_part(a: Part<'_>, b: Part<'_>) -> std::cmp::Ordering {
+    let a_num = if a.kind == PartKind::Digit {
+        parse_i64_ascii(a.text)
+    } else {
+        None
+    };
+    let b_num = if b.kind == PartKind::Digit {
+        parse_i64_ascii(b.text)
+    } else {
+        None
+    };
 
     match (a_num, b_num) {
-        (Ok(an), Ok(bn)) => an.cmp(&bn),
-        (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
-        (Err(_), Ok(_)) => std::cmp::Ordering::Less,
-        (Err(_), Err(_)) => {
-            // Both are strings - use special ordering
-            let a_order = special_order(a);
-            let b_order = special_order(b);
+        (Some(an), Some(bn)) => an.cmp(&bn),
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => {
+            let a_order = special_order(a.text);
+            let b_order = special_order(b.text);
             a_order.cmp(&b_order)
         }
     }
 }
 
-fn special_order(s: &str) -> i32 {
-    match s.to_lowercase().as_str() {
-        "dev" => 0,
-        "alpha" | "a" => 1,
-        "beta" | "b" => 2,
-        "rc" => 3,
-        "" | "stable" => 4,
-        "patch" | "pl" | "p" => 5,
-        _ => 4,
+fn parse_i64_ascii(s: &str) -> Option<i64> {
+    if s.is_empty() {
+        return None;
     }
+    let mut value: i64 = 0;
+    for b in s.as_bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        let digit = (b - b'0') as i64;
+        value = value.checked_mul(10)?.checked_add(digit)?;
+    }
+    Some(value)
+}
+
+fn special_order(s: &str) -> i32 {
+    if s.is_empty() || s.eq_ignore_ascii_case("stable") {
+        return 4;
+    }
+    if s.eq_ignore_ascii_case("dev") {
+        return 0;
+    }
+    if s.eq_ignore_ascii_case("alpha") || s.eq_ignore_ascii_case("a") {
+        return 1;
+    }
+    if s.eq_ignore_ascii_case("beta") || s.eq_ignore_ascii_case("b") {
+        return 2;
+    }
+    if s.eq_ignore_ascii_case("rc") {
+        return 3;
+    }
+    if s.eq_ignore_ascii_case("patch") || s.eq_ignore_ascii_case("pl") || s.eq_ignore_ascii_case("p") {
+        return 5;
+    }
+    4
 }
 
 #[cfg(test)]

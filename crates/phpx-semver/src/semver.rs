@@ -1,6 +1,6 @@
 //! Semver facade providing high-level version operations
 
-use crate::{Comparator, VersionParser};
+use crate::{Comparator, ParsedConstraints, VersionParser};
 use crate::constraint::{Constraint, Operator};
 
 /// Main facade for semantic versioning operations
@@ -35,11 +35,34 @@ impl Semver {
 
     /// Return all versions that satisfy the given constraints
     pub fn satisfied_by(versions: &[&str], constraints: &str) -> Vec<String> {
+        let parser = VersionParser::new();
+        let parsed_constraints = match parser.parse_constraints_cached(constraints) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
         versions
             .iter()
-            .filter(|v| Self::satisfies(v, constraints))
-            .map(|v| v.to_string())
+            .filter_map(|v| {
+                let normalized = parser.normalize(v).ok()?;
+                if parsed_constraints.matches_normalized(&normalized) {
+                    Some(v.to_string())
+                } else {
+                    None
+                }
+            })
             .collect()
+    }
+
+    /// Parse constraints and return a reusable representation.
+    pub fn parse_constraints(constraints: &str) -> Result<ParsedConstraints, crate::VersionParserError> {
+        let parser = VersionParser::new();
+        parser.parse_constraints_cached(constraints)
+    }
+
+    /// Check a version against pre-parsed constraints.
+    pub fn satisfies_parsed(version: &str, constraints: &ParsedConstraints) -> bool {
+        constraints.satisfies(version)
     }
 
     /// Sort versions in ascending order
@@ -312,5 +335,13 @@ mod tests {
         let versions2 = vec!["dev-foo", "dev-master", "1.0", "50.2"];
         let rsorted2 = Semver::rsort(&versions2);
         assert_eq!(rsorted2, vec!["dev-master", "50.2", "1.0", "dev-foo"]);
+    }
+
+    #[test]
+    fn test_parsed_constraints_reuse() {
+        let parsed = Semver::parse_constraints("^1.2").unwrap();
+        assert!(Semver::satisfies_parsed("1.2.3", &parsed));
+        assert!(Semver::satisfies_parsed("1.9.0", &parsed));
+        assert!(!Semver::satisfies_parsed("2.0.0", &parsed));
     }
 }

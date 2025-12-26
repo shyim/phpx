@@ -11,4 +11,4 @@ mod version_parser;
 pub use comparator::Comparator;
 pub use constraint::{Bound, Constraint, ConstraintInterface, MatchAllConstraint, MatchNoneConstraint, MultiConstraint, Operator};
 pub use semver::Semver;
-pub use version_parser::{Stability, VersionParser, VersionParserError};
+pub use version_parser::{ParsedConstraints, Stability, VersionParser, VersionParserError};
