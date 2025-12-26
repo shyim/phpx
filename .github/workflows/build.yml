@@ -1,0 +1,50 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: namespace-profile-phpx
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+        include:
+          - platform: linux/amd64
+            artifact_name: phpx-linux-amd64
+          - platform: linux/arm64
+            artifact_name: phpx-linux-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install and configure Namespace CLI
+        uses: namespacelabs/nscloud-setup@v0
+
+      - name: Configure Namespace powered Buildx
+        uses: namespacelabs/nscloud-setup-buildx-action@v0
+
+      - name: Build binary
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          outputs: type=local,dest=./output
+          cache-from: type=gha,scope=build-${{ matrix.artifact_name }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.artifact_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ./output/phpx
+          if-no-files-found: error
