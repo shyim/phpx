@@ -5,7 +5,7 @@ use clap::Args;
 use std::path::PathBuf;
 
 use phpx_pm::{
-    Composer,
+    ComposerBuilder,
     config::Config,
     installer::Installer,
     json::{ComposerJson, ComposerLock},
@@ -61,13 +61,13 @@ pub async fn execute(args: DumpAutoloadArgs) -> Result<i32> {
     // Load config
     let config = Config::build(Some(&working_dir), true)?;
 
-    // Create Composer
-    let composer = Composer::new(
-        working_dir.clone(),
-        config,
-        composer_json,
-        lock
-    )?;
+    // Create Composer using builder
+    let composer = ComposerBuilder::new(working_dir.clone())
+        .with_config(config)
+        .with_composer_json(composer_json)
+        .with_composer_lock(lock)
+        .no_dev(args.no_dev)
+        .build()?;
 
     // Run Installer
     let installer = Installer::new(composer);

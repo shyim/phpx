@@ -23,6 +23,6 @@ pub use downloader::{DownloadManager, DownloadResult};
 pub use installer::{InstallationManager, InstallConfig};
 pub use autoload::{AutoloadGenerator, AutoloadConfig};
 pub use plugin::PluginRegistry;
-pub use composer::Composer;
+pub use composer::{Composer, ComposerBuilder};
 pub use util::is_platform_package;
 #[cfg(test)] mod test_content_hash;

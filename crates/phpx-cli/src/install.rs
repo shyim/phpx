@@ -6,7 +6,7 @@ use console::style;
 use std::path::PathBuf;
 
 use phpx_pm::{
-    Composer,
+    ComposerBuilder,
     config::Config,
     installer::Installer,
     json::{ComposerJson, ComposerLock},
@@ -115,35 +115,37 @@ pub async fn execute(args: InstallArgs) -> Result<i32> {
     // Load config
     let config = Config::build(Some(&working_dir), true)?;
 
-    // Create Composer
-    let composer = Composer::new(
-        working_dir.clone(),
-        config,
-        composer_json,
-        lock
-    )?;
+    // Detect platform
+    let platform = PlatformInfo::detect();
+
+    // Create Composer using builder
+    let mut builder = ComposerBuilder::new(working_dir.clone())
+        .with_config(config)
+        .with_composer_json(composer_json)
+        .with_composer_lock(lock)
+        .with_platform_packages(platform.to_packages())
+        .dry_run(args.dry_run)
+        .no_dev(args.no_dev);
+
+    // Apply prefer_source/prefer_dist flags
+    if args.prefer_source {
+        builder = builder.prefer_source(true);
+    } else if args.prefer_dist {
+        builder = builder.prefer_dist(true);
+    }
+
+    let composer = builder.build()?;
 
     // Run Installer
     let installer = Installer::new(composer);
 
     if run_update {
-        // Detect platform for update
-        println!("Detecting platform...");
-        let platform = PlatformInfo::detect();
-        let platform_packages = platform.to_packages();
-
         installer.update(
-            platform_packages,
-            args.dry_run,
-            args.no_dev,
             args.optimize_autoloader,
-            false, // prefer_lowest
-            false  // lock (update_lock_only)
+            false  // update_lock_only
         ).await
     } else {
         installer.install(
-            args.dry_run,
-            args.no_dev,
             args.no_scripts,
             args.optimize_autoloader,
             args.classmap_authoritative,

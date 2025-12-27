@@ -25,9 +25,14 @@ impl Installer {
         Self { composer }
     }
 
-    pub async fn update(&self, platform_packages: Vec<Package>, dry_run: bool, no_dev: bool, optimize_autoloader: bool, prefer_lowest: bool, update_lock_only: bool) -> Result<i32> {
+    pub async fn update(&self, optimize_autoloader: bool, update_lock_only: bool) -> Result<i32> {
         let composer_json = &self.composer.composer_json;
         let working_dir = &self.composer.working_dir;
+        let install_config = self.composer.installation_manager.config();
+        let dry_run = install_config.dry_run;
+        let no_dev = install_config.no_dev;
+        let prefer_lowest = install_config.prefer_lowest;
+        let platform_packages = &self.composer.platform_packages;
 
         log::debug!("Reading {}/composer.json", working_dir.display());
 
@@ -119,11 +124,9 @@ impl Installer {
         }
 
         // Add platform packages (bypass stability filtering - these are fixed system packages)
-        for pkg in &platform_packages {
-            log::debug!("Platform package: {} {}", pkg.name, pkg.version);
-        }
         for pkg in platform_packages {
-            pool.add_platform_package(pkg);
+            log::debug!("Platform package: {} {}", pkg.name, pkg.version);
+            pool.add_platform_package(pkg.clone());
         }
 
         // Load packages with constraint-based filtering
@@ -420,9 +423,12 @@ impl Installer {
         Ok(0)
     }
 
-    pub async fn install(&self, dry_run: bool, no_dev: bool, no_scripts: bool, optimize_autoloader: bool, _classmap_authoritative: bool, _apcu_autoloader: bool, _ignore_platform_reqs: bool) -> Result<i32> {
+    pub async fn install(&self, no_scripts: bool, optimize_autoloader: bool, _classmap_authoritative: bool, _apcu_autoloader: bool, _ignore_platform_reqs: bool) -> Result<i32> {
         let composer_json = &self.composer.composer_json;
         let working_dir = &self.composer.working_dir;
+        let install_config = self.composer.installation_manager.config();
+        let dry_run = install_config.dry_run;
+        let no_dev = install_config.no_dev;
         let lock = self.composer.composer_lock.as_ref().context("No composer.lock file found")?;
 
         // Detect root package version

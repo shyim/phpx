@@ -30,6 +30,8 @@ pub struct InstallConfig {
     pub dry_run: bool,
     /// Skip dev dependencies
     pub no_dev: bool,
+    /// Prefer lowest versions (useful for testing compatibility)
+    pub prefer_lowest: bool,
 }
 
 impl Default for InstallConfig {
@@ -44,6 +46,7 @@ impl Default for InstallConfig {
             prefer_dist: true,
             dry_run: false,
             no_dev: false,
+            prefer_lowest: false,
         }
     }
 }

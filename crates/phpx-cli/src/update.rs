@@ -6,7 +6,7 @@ use console::style;
 use std::path::PathBuf;
 
 use phpx_pm::{
-    Composer,
+    ComposerBuilder,
     config::Config,
     installer::Installer,
     json::ComposerJson,
@@ -137,29 +137,32 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
     // Load config
     let config = Config::build(Some(&working_dir), true)?;
 
-    // Create Composer
-    let composer = Composer::new(
-        working_dir.clone(),
-        config,
-        composer_json,
-        None
-    )?;
-
     // Detect platform
-    println!("Detecting platform...");
     let platform = PlatformInfo::detect();
-    let platform_packages = platform.to_packages();
+
+    // Create Composer using builder
+    let mut builder = ComposerBuilder::new(working_dir.clone())
+        .with_config(config)
+        .with_composer_json(composer_json)
+        .with_platform_packages(platform.to_packages())
+        .dry_run(args.dry_run)
+        .no_dev(args.no_dev)
+        .prefer_lowest(args.prefer_lowest);
+
+    // Apply prefer_source/prefer_dist flags
+    if args.prefer_source {
+        builder = builder.prefer_source(true);
+    } else if args.prefer_dist {
+        builder = builder.prefer_dist(true);
+    }
+
+    let composer = builder.build()?;
 
     // Run Installer
     let installer = Installer::new(composer);
-    
-    // Pass relevant args to update
+
     installer.update(
-        platform_packages,
-        args.dry_run,
-        args.no_dev,
         args.optimize_autoloader,
-        args.prefer_lowest,
         args.lock
     ).await
 }
