@@ -244,7 +244,7 @@ int phpx_lint_file(const char *script_path, int argc, char **argv) {
 
 /*
  * Print phpinfo() output.
- * flag: -1 for all, or specific INFO_* constant
+ * flag: -1 for all, or specific PHP_INFO_* constant
  */
 int phpx_info(int flag, int argc, char **argv) {
     phpx_script_filename = "phpinfo";
@@ -254,7 +254,7 @@ int phpx_info(int flag, int argc, char **argv) {
     }
 
     zend_first_try {
-        php_print_info(flag == -1 ? PHP_INFO_ALL : flag);
+        php_print_info(flag == -1 ? PHP_INFO_ALL : (unsigned int)flag);
     } zend_catch {
     } zend_end_try();
 
