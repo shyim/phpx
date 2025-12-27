@@ -7,13 +7,12 @@ use indicatif::{ProgressBar, ProgressStyle};
 use tokio::task::JoinSet;
 
 use crate::composer::Composer;
-use crate::json::{ComposerLock, ComposerJson, LockedPackage, LockSource, LockDist, LockAutoload};
-use crate::package::{Package, Stability, Autoload, AutoloadPath, detect_root_version, RootVersion};
+use crate::json::{ComposerLock, ComposerJson, LockedPackage};
+use crate::package::{Package, Stability, Autoload, detect_root_version, RootVersion};
 use crate::solver::{Pool, Policy, Request, Solver};
 use crate::autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload, RootPackageInfo, get_head_commit};
 use crate::plugin::PluginRegistry;
 use crate::scripts;
-use crate::package::{Dist, Source};
 use crate::util::is_platform_package;
 
 pub struct Installer {
@@ -327,8 +326,8 @@ impl Installer {
 
         let lock = ComposerLock {
             content_hash: compute_content_hash(composer_json),
-            packages: prod_packages.iter().map(|p| package_to_locked(p)).collect(),
-            packages_dev: dev_packages.iter().map(|p| package_to_locked(p)).collect(),
+            packages: prod_packages.iter().map(|p| LockedPackage::from(*p)).collect(),
+            packages_dev: dev_packages.iter().map(|p| LockedPackage::from(*p)).collect(),
             ..Default::default()
         };
 
@@ -441,9 +440,9 @@ impl Installer {
         }
 
         // Convert locked packages
-        let mut packages: Vec<Package> = lock.packages.iter().map(locked_package_to_package).collect();
+        let mut packages: Vec<Package> = lock.packages.iter().map(Package::from).collect();
         if !no_dev {
-            packages.extend(lock.packages_dev.iter().map(locked_package_to_package));
+            packages.extend(lock.packages_dev.iter().map(Package::from));
         }
 
         if packages.is_empty() {
@@ -569,9 +568,9 @@ impl Installer {
                 package_autoloads.extend(lock.packages_dev.iter().map(|lp| locked_package_to_autoload(lp, true, &aliases_map)));
             }
             
-            all_installed_packages = lock.packages.iter().map(locked_package_to_package).collect();
+            all_installed_packages = lock.packages.iter().map(Package::from).collect();
             if dev_mode {
-                all_installed_packages.extend(lock.packages_dev.iter().map(locked_package_to_package));
+                all_installed_packages.extend(lock.packages_dev.iter().map(Package::from));
             }
             
             if !lock.content_hash.is_empty() {
@@ -698,29 +697,6 @@ fn create_root_package_info(
     }
 }
 
-fn locked_package_to_package(lp: &LockedPackage) -> Package {
-    let mut pkg = Package::new(&lp.name, &lp.version);
-    pkg.description = lp.description.clone();
-    pkg.homepage = lp.homepage.clone();
-    pkg.license = lp.license.clone();
-    pkg.keywords = lp.keywords.clone();
-    pkg.require = lp.require.clone();
-    pkg.require_dev = lp.require_dev.clone();
-    pkg.conflict = lp.conflict.clone();
-    pkg.provide = lp.provide.clone();
-    pkg.replace = lp.replace.clone();
-    pkg.bin = lp.bin.clone();
-    pkg.package_type = lp.package_type.clone();
-    if let Some(src) = &lp.source { pkg.source = Some(Source::new(&src.source_type, &src.url, &src.reference)); }
-    if let Some(dist) = &lp.dist {
-        let mut d = Dist::new(&dist.dist_type, &dist.url);
-        if let Some(ref r) = dist.reference { d = d.with_reference(r); }
-        if let Some(ref s) = dist.shasum { d = d.with_shasum(s); }
-        pkg.dist = Some(d);
-    }
-    pkg
-}
-
 fn extract_stability_flag(constraint: &str) -> Option<Stability> {
     if let Some(at_pos) = constraint.rfind('@') {
         let stability_str = &constraint[at_pos + 1..];
@@ -841,51 +817,8 @@ fn compute_content_hash(json: &crate::json::ComposerJson) -> String {
     format!("{:x}", result)
 }
 
-fn package_to_locked(pkg: &Package) -> LockedPackage {
-    let autoload = pkg.autoload.as_ref().map(|a| convert_to_lock_autoload(a)).unwrap_or_default();
-    let autoload_dev = pkg.autoload_dev.as_ref().map(|a| convert_to_lock_autoload(a)).unwrap_or_default();
-    
-    // Authors and Funding omitted for brevity in this initial port, keeping it simple or I should copy full logic.
-    // I'll assume full logic is desired, but for space I might need to check imports.
-    // I already imported LockAutoload etc.
-    // Let's copy basic fields.
-    
-    LockedPackage {
-        name: pkg.name.clone(),
-        version: pkg.pretty_version().to_string(),
-        source: pkg.source.as_ref().map(|s| LockSource { source_type: s.source_type.clone(), url: s.url.clone(), reference: s.reference.clone() }),
-        dist: pkg.dist.as_ref().map(|d| LockDist { dist_type: d.dist_type.clone(), url: d.url.clone(), reference: d.reference.clone(), shasum: d.shasum.clone() }),
-        require: pkg.require.clone(),
-        require_dev: pkg.require_dev.clone(),
-        conflict: pkg.conflict.clone(),
-        provide: pkg.provide.clone(),
-        replace: pkg.replace.clone(),
-        bin: pkg.bin.clone(),
-        package_type: pkg.package_type.clone(),
-        extra: pkg.extra.clone(),
-        autoload,
-        autoload_dev,
-        description: pkg.description.clone(),
-        homepage: pkg.homepage.clone(),
-        keywords: pkg.keywords.clone(),
-        license: pkg.license.clone(),
-        time: pkg.time.map(|t| t.to_rfc3339()),
-        ..Default::default()
-    }
-}
-
-fn convert_to_lock_autoload(a: &Autoload) -> LockAutoload {
-    LockAutoload {
-         psr4: a.psr4.iter().map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null))).collect(),
-         psr0: a.psr0.iter().map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null))).collect(),
-         classmap: a.classmap.clone(),
-         files: a.files.clone(),
-         exclude_from_classmap: a.exclude_from_classmap.clone(),
-    }
-}
-
 fn locked_package_to_autoload(lp: &LockedPackage, is_dev: bool, aliases_map: &HashMap<String, Vec<String>>) -> PackageAutoload {
-    let autoload = convert_lock_autoload(&lp.autoload);
+    let autoload = Autoload::from(&lp.autoload);
     let requires: Vec<String> = lp.require.keys().filter(|k| !is_platform_package(k)).cloned().collect();
     let reference = lp.source.as_ref().map(|s| s.reference.clone()).or_else(|| lp.dist.as_ref().and_then(|d| d.reference.clone()));
     let aliases = aliases_map.get(&lp.name).cloned().unwrap_or_default();
@@ -906,23 +839,3 @@ fn locked_package_to_autoload(lp: &LockedPackage, is_dev: bool, aliases_map: &Ha
     }
 }
 
-fn convert_lock_autoload(lock_autoload: &LockAutoload) -> Autoload {
-    let mut autoload = Autoload::default();
-    for (ns, v) in &lock_autoload.psr4 { autoload.psr4.insert(ns.clone(), json_value_to_paths(v)); }
-    for (ns, v) in &lock_autoload.psr0 { autoload.psr0.insert(ns.clone(), json_value_to_paths(v)); }
-    autoload.classmap = lock_autoload.classmap.clone();
-    autoload.files = lock_autoload.files.clone();
-    autoload.exclude_from_classmap = lock_autoload.exclude_from_classmap.clone();
-    autoload
-}
-
-fn json_value_to_paths(value: &serde_json::Value) -> AutoloadPath {
-    match value {
-        serde_json::Value::String(s) => AutoloadPath::Single(s.clone()),
-        serde_json::Value::Array(arr) => {
-            let paths: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
-            if paths.len() == 1 { AutoloadPath::Single(paths[0].clone()) } else { AutoloadPath::Multiple(paths) }
-        }
-        _ => AutoloadPath::Single(String::new()),
-    }
-}

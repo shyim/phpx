@@ -5,6 +5,7 @@
 
 mod alias;
 mod autoload;
+mod convert;
 mod link;
 mod package;
 mod root_version;
