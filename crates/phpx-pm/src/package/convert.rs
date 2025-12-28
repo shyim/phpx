@@ -2,9 +2,9 @@
 
 use phpx_semver::VersionParser;
 
-use super::{Autoload, AutoloadPath, Dist, Package, Source};
+use super::{Autoload, AutoloadPath, Author, Dist, Funding, Package, Source, Support};
 use crate::json::{
-    LockAutoload, LockDist, LockSource, LockedPackage,
+    LockAutoload, LockAuthor, LockDist, LockFunding, LockSource, LockedPackage,
 };
 
 impl From<&LockedPackage> for Package {
@@ -31,6 +31,12 @@ impl From<&LockedPackage> for Package {
         pkg.notification_url = lp.notification_url.clone();
         pkg.installation_source = lp.installation_source.clone();
         pkg.default_branch = lp.default_branch;
+        pkg.authors = lp.authors.iter().map(Author::from).collect();
+        pkg.funding = lp.funding.iter().map(Funding::from).collect();
+
+        if !lp.support.is_empty() {
+            pkg.support = Some(Support::from(&lp.support));
+        }
 
         if let Some(ref src) = lp.source {
             pkg.source = Some(Source::new(&src.source_type, &src.url, &src.reference));
@@ -97,6 +103,9 @@ impl From<&Package> for LockedPackage {
             time: pkg.time.map(|t| t.to_rfc3339()),
             installation_source: pkg.installation_source.clone(),
             default_branch: pkg.default_branch,
+            authors: pkg.authors.iter().map(LockAuthor::from).collect(),
+            support: pkg.support.as_ref().map(support_to_hashmap).unwrap_or_default(),
+            funding: pkg.funding.iter().map(LockFunding::from).collect(),
             ..Default::default()
         }
     }
@@ -179,6 +188,78 @@ fn json_value_to_paths(value: &serde_json::Value) -> AutoloadPath {
     }
 }
 
+impl From<&LockAuthor> for Author {
+    fn from(la: &LockAuthor) -> Self {
+        Author {
+            name: Some(la.name.clone()),
+            email: la.email.clone(),
+            homepage: la.homepage.clone(),
+            role: la.role.clone(),
+        }
+    }
+}
+
+impl From<&Author> for LockAuthor {
+    fn from(a: &Author) -> Self {
+        LockAuthor {
+            name: a.name.clone().unwrap_or_default(),
+            email: a.email.clone(),
+            homepage: a.homepage.clone(),
+            role: a.role.clone(),
+        }
+    }
+}
+
+impl From<&std::collections::HashMap<String, String>> for Support {
+    fn from(map: &std::collections::HashMap<String, String>) -> Self {
+        Support {
+            issues: map.get("issues").cloned(),
+            forum: map.get("forum").cloned(),
+            wiki: map.get("wiki").cloned(),
+            source: map.get("source").cloned(),
+            email: map.get("email").cloned(),
+            irc: map.get("irc").cloned(),
+            docs: map.get("docs").cloned(),
+            rss: map.get("rss").cloned(),
+            chat: map.get("chat").cloned(),
+            security: map.get("security").cloned(),
+        }
+    }
+}
+
+fn support_to_hashmap(s: &Support) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(ref v) = s.issues { map.insert("issues".to_string(), v.clone()); }
+    if let Some(ref v) = s.forum { map.insert("forum".to_string(), v.clone()); }
+    if let Some(ref v) = s.wiki { map.insert("wiki".to_string(), v.clone()); }
+    if let Some(ref v) = s.source { map.insert("source".to_string(), v.clone()); }
+    if let Some(ref v) = s.email { map.insert("email".to_string(), v.clone()); }
+    if let Some(ref v) = s.irc { map.insert("irc".to_string(), v.clone()); }
+    if let Some(ref v) = s.docs { map.insert("docs".to_string(), v.clone()); }
+    if let Some(ref v) = s.rss { map.insert("rss".to_string(), v.clone()); }
+    if let Some(ref v) = s.chat { map.insert("chat".to_string(), v.clone()); }
+    if let Some(ref v) = s.security { map.insert("security".to_string(), v.clone()); }
+    map
+}
+
+impl From<&LockFunding> for Funding {
+    fn from(lf: &LockFunding) -> Self {
+        Funding {
+            funding_type: Some(lf.funding_type.clone()),
+            url: Some(lf.url.clone()),
+        }
+    }
+}
+
+impl From<&Funding> for LockFunding {
+    fn from(f: &Funding) -> Self {
+        LockFunding {
+            url: f.url.clone().unwrap_or_default(),
+            funding_type: f.funding_type.clone().unwrap_or_default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +309,158 @@ mod tests {
         assert_eq!(converted.homepage, original.homepage);
         assert_eq!(converted.license, original.license);
         assert_eq!(converted.require, original.require);
+    }
+
+    #[test]
+    fn test_notification_url_roundtrip() {
+        let mut original = Package::new("vendor/package", "1.0.0");
+        original.notification_url = Some("https://packagist.org/downloads/".to_string());
+
+        let locked = LockedPackage::from(&original);
+        assert_eq!(locked.notification_url, Some("https://packagist.org/downloads/".to_string()));
+
+        let converted = Package::from(&locked);
+        assert_eq!(converted.notification_url, original.notification_url);
+    }
+
+    #[test]
+    fn test_authors_roundtrip() {
+        let mut original = Package::new("vendor/package", "1.0.0");
+        original.authors = vec![
+            Author {
+                name: Some("John Doe".to_string()),
+                email: Some("john@example.com".to_string()),
+                homepage: Some("https://johndoe.com".to_string()),
+                role: Some("Developer".to_string()),
+            },
+            Author {
+                name: Some("Jane Smith".to_string()),
+                email: None,
+                homepage: None,
+                role: Some("Maintainer".to_string()),
+            },
+        ];
+
+        let locked = LockedPackage::from(&original);
+        assert_eq!(locked.authors.len(), 2);
+        assert_eq!(locked.authors[0].name, "John Doe");
+        assert_eq!(locked.authors[0].email, Some("john@example.com".to_string()));
+        assert_eq!(locked.authors[0].homepage, Some("https://johndoe.com".to_string()));
+        assert_eq!(locked.authors[0].role, Some("Developer".to_string()));
+        assert_eq!(locked.authors[1].name, "Jane Smith");
+        assert_eq!(locked.authors[1].role, Some("Maintainer".to_string()));
+
+        let converted = Package::from(&locked);
+        assert_eq!(converted.authors.len(), 2);
+        assert_eq!(converted.authors[0].name, Some("John Doe".to_string()));
+        assert_eq!(converted.authors[0].email, Some("john@example.com".to_string()));
+        assert_eq!(converted.authors[1].name, Some("Jane Smith".to_string()));
+    }
+
+    #[test]
+    fn test_support_roundtrip() {
+        let mut original = Package::new("vendor/package", "1.0.0");
+        original.support = Some(Support {
+            issues: Some("https://github.com/vendor/package/issues".to_string()),
+            source: Some("https://github.com/vendor/package".to_string()),
+            docs: Some("https://docs.example.com".to_string()),
+            email: Some("support@example.com".to_string()),
+            forum: None,
+            wiki: None,
+            irc: None,
+            rss: None,
+            chat: Some("https://discord.gg/example".to_string()),
+            security: Some("https://example.com/security".to_string()),
+        });
+
+        let locked = LockedPackage::from(&original);
+        assert_eq!(locked.support.get("issues"), Some(&"https://github.com/vendor/package/issues".to_string()));
+        assert_eq!(locked.support.get("source"), Some(&"https://github.com/vendor/package".to_string()));
+        assert_eq!(locked.support.get("docs"), Some(&"https://docs.example.com".to_string()));
+        assert_eq!(locked.support.get("email"), Some(&"support@example.com".to_string()));
+        assert_eq!(locked.support.get("chat"), Some(&"https://discord.gg/example".to_string()));
+        assert_eq!(locked.support.get("security"), Some(&"https://example.com/security".to_string()));
+        assert_eq!(locked.support.get("forum"), None);
+
+        let converted = Package::from(&locked);
+        let support = converted.support.unwrap();
+        assert_eq!(support.issues, Some("https://github.com/vendor/package/issues".to_string()));
+        assert_eq!(support.source, Some("https://github.com/vendor/package".to_string()));
+        assert_eq!(support.docs, Some("https://docs.example.com".to_string()));
+        assert_eq!(support.chat, Some("https://discord.gg/example".to_string()));
+        assert_eq!(support.forum, None);
+    }
+
+    #[test]
+    fn test_funding_roundtrip() {
+        let mut original = Package::new("vendor/package", "1.0.0");
+        original.funding = vec![
+            Funding {
+                funding_type: Some("github".to_string()),
+                url: Some("https://github.com/sponsors/johndoe".to_string()),
+            },
+            Funding {
+                funding_type: Some("patreon".to_string()),
+                url: Some("https://patreon.com/johndoe".to_string()),
+            },
+            Funding {
+                funding_type: Some("opencollective".to_string()),
+                url: Some("https://opencollective.com/package".to_string()),
+            },
+        ];
+
+        let locked = LockedPackage::from(&original);
+        assert_eq!(locked.funding.len(), 3);
+        assert_eq!(locked.funding[0].funding_type, "github");
+        assert_eq!(locked.funding[0].url, "https://github.com/sponsors/johndoe");
+        assert_eq!(locked.funding[1].funding_type, "patreon");
+        assert_eq!(locked.funding[1].url, "https://patreon.com/johndoe");
+        assert_eq!(locked.funding[2].funding_type, "opencollective");
+
+        let converted = Package::from(&locked);
+        assert_eq!(converted.funding.len(), 3);
+        assert_eq!(converted.funding[0].funding_type, Some("github".to_string()));
+        assert_eq!(converted.funding[0].url, Some("https://github.com/sponsors/johndoe".to_string()));
+        assert_eq!(converted.funding[1].funding_type, Some("patreon".to_string()));
+    }
+
+    #[test]
+    fn test_complete_metadata_roundtrip() {
+        let mut original = Package::new("vendor/package", "1.0.0");
+        original.notification_url = Some("https://packagist.org/downloads/".to_string());
+        original.authors = vec![Author {
+            name: Some("Test Author".to_string()),
+            email: Some("test@example.com".to_string()),
+            homepage: None,
+            role: None,
+        }];
+        original.support = Some(Support {
+            issues: Some("https://github.com/vendor/package/issues".to_string()),
+            source: Some("https://github.com/vendor/package".to_string()),
+            docs: None,
+            email: None,
+            forum: None,
+            wiki: None,
+            irc: None,
+            rss: None,
+            chat: None,
+            security: None,
+        });
+        original.funding = vec![Funding {
+            funding_type: Some("github".to_string()),
+            url: Some("https://github.com/sponsors/test".to_string()),
+        }];
+
+        let locked = LockedPackage::from(&original);
+        assert!(locked.notification_url.is_some());
+        assert!(!locked.authors.is_empty());
+        assert!(!locked.support.is_empty());
+        assert!(!locked.funding.is_empty());
+
+        let converted = Package::from(&locked);
+        assert_eq!(converted.notification_url, original.notification_url);
+        assert_eq!(converted.authors.len(), original.authors.len());
+        assert!(converted.support.is_some());
+        assert_eq!(converted.funding.len(), original.funding.len());
     }
 }
