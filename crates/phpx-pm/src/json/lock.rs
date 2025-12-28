@@ -76,23 +76,23 @@ pub struct ComposerLock {
     pub packages_dev: Vec<LockedPackage>,
 
     /// Package aliases
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub aliases: Vec<LockAlias>,
 
     /// Minimum stability
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub minimum_stability: String,
 
     /// Per-package stability flags
-    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
+    #[serde(default, deserialize_with = "deserialize_map_or_empty_array")]
     pub stability_flags: HashMap<String, u8>,
 
     /// Whether to prefer stable versions
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub prefer_stable: bool,
 
     /// Whether to prefer lowest versions
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default)]
     pub prefer_lowest: bool,
 
     /// Platform requirements

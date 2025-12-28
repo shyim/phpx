@@ -362,7 +362,6 @@ impl Installer {
         let summary = transaction.summary();
         let lock_file_changed = summary.installs > 0 || summary.updates > 0 || summary.uninstalls > 0;
 
-        // Generate lock file content
         let non_dev_roots: HashSet<String> = composer_json.require.keys()
             .filter(|k| !is_platform_package(k))
             .map(|k| k.to_lowercase())
@@ -372,17 +371,35 @@ impl Installer {
         let (prod_packages, dev_packages): (Vec<_>, Vec<_>) = packages.iter()
             .partition(|p| non_dev_packages.contains(&p.name.to_lowercase()));
 
-        // Count operations for logging
         let install_count = packages.len();
         let update_count = 0; // TODO: track updates vs installs properly
         let removal_count = 0; // TODO: track removals
         log::info!("Lock file operations: {} installs, {} updates, {} removals",
             install_count, update_count, removal_count);
 
+        let mut platform_reqs: HashMap<String, String> = HashMap::new();
+        let mut platform_dev_reqs: HashMap<String, String> = HashMap::new();
+        for (name, constraint) in &composer_json.require {
+            if is_platform_package(name) {
+                platform_reqs.insert(name.clone(), constraint.clone());
+            }
+        }
+        for (name, constraint) in &composer_json.require_dev {
+            if is_platform_package(name) {
+                platform_dev_reqs.insert(name.clone(), constraint.clone());
+            }
+        }
+
         let lock = ComposerLock {
             content_hash: compute_content_hash(composer_json),
             packages: prod_packages.iter().map(|p| LockedPackage::from(*p)).collect(),
             packages_dev: dev_packages.iter().map(|p| LockedPackage::from(*p)).collect(),
+            minimum_stability: composer_json.minimum_stability.clone().unwrap_or_else(|| "stable".to_string()),
+            prefer_stable: composer_json.prefer_stable.unwrap_or(false),
+            prefer_lowest,
+            platform: platform_reqs,
+            platform_dev: platform_dev_reqs,
+            plugin_api_version: "2.6.0".to_string(),
             ..Default::default()
         };
 
