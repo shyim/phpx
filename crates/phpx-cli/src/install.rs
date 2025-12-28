@@ -82,11 +82,22 @@ pub struct InstallArgs {
     /// Increase verbosity (-v, -vv, -vvv)
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Skip the audit step after installation (env: COMPOSER_NO_AUDIT)
+    #[arg(long)]
+    pub no_audit: bool,
+
+    /// Audit output format (table, plain, json, or summary)
+    #[arg(long, default_value = "summary")]
+    pub audit_format: String,
 }
 
 use crate::pm::platform::PlatformInfo;
 
 pub async fn execute(args: InstallArgs) -> Result<i32> {
+    // Check COMPOSER_NO_AUDIT environment variable
+    let skip_audit = args.no_audit || std::env::var("COMPOSER_NO_AUDIT").unwrap_or_default() == "1";
+
     let working_dir = args.working_dir.canonicalize()
         .context("Failed to resolve working directory")?;
 
@@ -139,7 +150,7 @@ pub async fn execute(args: InstallArgs) -> Result<i32> {
     // Run Installer
     let installer = Installer::new(composer);
 
-    if run_update {
+    let result = if run_update {
         installer.update(
             args.optimize_autoloader,
             false,
@@ -153,5 +164,22 @@ pub async fn execute(args: InstallArgs) -> Result<i32> {
             args.apcu_autoloader,
             args.ignore_platform_reqs
         ).await
+    };
+
+    // Run audit after successful install unless --no-audit is specified
+    if result.is_ok() && !skip_audit {
+        let audit_args = crate::pm::audit::AuditArgs {
+            no_dev: args.no_dev,
+            format: args.audit_format.clone(),
+            locked: false,
+            abandoned: Some("report".to_string()),
+            working_dir: working_dir.clone(),
+        };
+
+        if let Err(e) = crate::pm::audit::execute(audit_args).await {
+            eprintln!("Warning: Audit failed: {}", e);
+        }
     }
+
+    result
 }

@@ -10,7 +10,7 @@ mod why;
 mod show;
 mod search;
 mod outdated;
-mod audit;
+pub mod audit;
 
 use clap::Subcommand;
 use anyhow::Result;
