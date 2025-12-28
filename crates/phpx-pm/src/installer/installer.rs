@@ -12,7 +12,7 @@ use crate::event::{
 };
 use crate::json::{ComposerLock, ComposerJson, LockedPackage};
 use crate::package::{Package, Stability, Autoload, detect_root_version, RootVersion};
-use crate::solver::{Pool, Policy, Request, Solver};
+use crate::solver::{Pool, Policy, Request, Solver, Transaction};
 use crate::autoload::{AutoloadConfig, AutoloadGenerator, PackageAutoload, RootPackageInfo, get_head_commit};
 use crate::util::is_platform_package;
 
@@ -25,7 +25,7 @@ impl Installer {
         Self { composer }
     }
 
-    pub async fn update(&self, optimize_autoloader: bool, update_lock_only: bool) -> Result<i32> {
+    pub async fn update(&self, optimize_autoloader: bool, update_lock_only: bool, update_packages: Option<Vec<String>>) -> Result<i32> {
         let composer_json = &self.composer.composer_json;
         let working_dir = &self.composer.working_dir;
         let install_config = self.composer.installation_manager.config();
@@ -305,11 +305,36 @@ impl Installer {
             request.fix(root_pkg);
         }
 
-        let policy = Policy::new().prefer_lowest(prefer_lowest);
+        let preferred_versions = match (&update_packages, &self.composer.composer_lock) {
+            (Some(packages_to_update), Some(lock)) if !packages_to_update.is_empty() => {
+                let update_allowlist: HashSet<String> = packages_to_update
+                    .iter()
+                    .map(|p| p.to_lowercase())
+                    .collect();
+
+                let mut preferred = HashMap::new();
+                for pkg in lock.packages.iter().chain(lock.packages_dev.iter()) {
+                    let pkg_name_lower = pkg.name.to_lowercase();
+                    if !update_allowlist.contains(&pkg_name_lower) {
+                        preferred.insert(pkg_name_lower, pkg.version.clone());
+                    }
+                }
+                log::debug!("Partial update: using {} preferred versions from lock file", preferred.len());
+                preferred
+            }
+            _ => {
+                log::debug!("Full update: no preferred versions, updating all packages");
+                HashMap::new()
+            }
+        };
+
+        let policy = Policy::new()
+            .prefer_lowest(prefer_lowest)
+            .preferred_versions(preferred_versions);
         let solver = Solver::new(&pool, &policy).with_optimization(true);
 
-        let transaction = match solver.solve(&request) {
-            Ok(tx) => tx,
+        let solver_result = match solver.solve(&request) {
+            Ok(result) => result,
             Err(problems) => {
                 spinner.finish_and_clear();
                 eprintln!("{} Could not resolve dependencies", style("Error:").red().bold());
@@ -322,16 +347,20 @@ impl Installer {
 
         spinner.set_message("Installing packages...");
 
-        let packages: Vec<Package> = transaction.installs()
+        let present_packages = self.load_installed_packages();
+        let transaction = Transaction::from_packages(
+            present_packages,
+            solver_result.packages.clone(),
+            solver_result.aliases,
+        );
+
+        let packages: Vec<Package> = solver_result.packages.iter()
             .map(|p| p.as_ref().clone())
             .filter(|p| !is_platform_package(&p.name))
             .collect();
 
-        if packages.is_empty() {
-            spinner.finish_and_clear();
-            println!("{} Nothing to update.", style("Info:").cyan());
-            return Ok(0);
-        }
+        let summary = transaction.summary();
+        let lock_file_changed = summary.installs > 0 || summary.updates > 0 || summary.uninstalls > 0;
 
         // Generate lock file content
         let non_dev_roots: HashSet<String> = composer_json.require.keys()
@@ -357,7 +386,8 @@ impl Installer {
             ..Default::default()
         };
 
-        if !dry_run {
+        // Only write lock file if there were changes
+        if lock_file_changed && !dry_run {
             log::debug!("Writing lock file");
             let lock_content = serde_json::to_string_pretty(&lock).context("Failed to serialize composer.lock")?;
             std::fs::write(working_dir.join("composer.lock"), lock_content).context("Failed to write composer.lock")?;
@@ -365,7 +395,11 @@ impl Installer {
 
         if update_lock_only {
              spinner.finish_and_clear();
-             println!("{} Lock file updated", style("Success:").green().bold());
+             if lock_file_changed {
+                 println!("{} Lock file updated", style("Success:").green().bold());
+             } else {
+                 println!("{} Lock file is up to date", style("Info:").cyan());
+             }
              return Ok(0);
         }
 
@@ -373,34 +407,25 @@ impl Installer {
         log::info!("Package operations: {} installs, {} updates, {} removals",
             install_count, update_count, removal_count);
 
-        // Install
         let manager = &self.composer.installation_manager;
-        // Hack: currently manager executes transaction, but we created a simplified transaction/list for lock
-        // In original update.rs it calls manager.execute(&transaction).
-        let result = manager.execute(&transaction).await
-            .map_err(|e| anyhow::anyhow!("Failed to execute installation: {}", e))?;
+        let result = manager.install_packages(&packages).await
+            .map_err(|e| anyhow::anyhow!("Failed to install packages: {}", e))?;
 
         spinner.finish_and_clear();
 
-        // Report
-        for pkg in &result.installed {
+        let actually_installed: Vec<_> = result.installed.iter()
+            .filter(|p| !is_platform_package(&p.name))
+            .collect();
+
+        for pkg in &actually_installed {
             log::debug!("Installed {} ({})", pkg.name, pkg.version);
             println!("  {} {} ({})", style("-").green(), style(&pkg.name).white().bold(), style(&pkg.version).yellow());
         }
-        for (from, to) in &result.updated {
-            log::debug!("Updated {} ({} => {})", to.name, from.version, to.version);
-            println!("  {} {} ({} => {})", style("-").cyan(), style(&to.name).white().bold(), style(&from.version).yellow(), style(&to.version).green());
-        }
 
-        // Autoload
-        if !dry_run { // check no_autoloader in args from caller? We don't have that arg here yet.
-             // We can assume if they called update() they want autoloader unless we add a flag.
-             // For now, I'll assume YES unless I add the flag to method signature.
-             // Added optimize_autoloader flag. I should add `no_autoloader` too?
-             // Lets assume we do it.
+        if !dry_run {
              println!("{} Generating autoload files", style("Info:").cyan());
              
-             let aliases_map: HashMap<String, Vec<String>> = HashMap::new(); // Empty for clean update
+             let aliases_map: HashMap<String, Vec<String>> = HashMap::new();
              let dev_mode = !no_dev;
 
              let mut package_autoloads: Vec<PackageAutoload> = lock.packages.iter()
@@ -442,7 +467,12 @@ impl Installer {
              }
         }
 
-        println!("{} {} packages updated", style("Success:").green().bold(), result.installed.len() + result.updated.len());
+        let total_changed = actually_installed.len() + result.updated.len();
+        if total_changed > 0 || lock_file_changed {
+            println!("{} {} packages updated", style("Success:").green().bold(), total_changed);
+        } else {
+            println!("{} Nothing to update.", style("Info:").cyan());
+        }
 
         // Dispatch post-update event
         if !dry_run {
@@ -644,6 +674,25 @@ impl Installer {
         }
 
         Ok(())
+    }
+
+    /// Load currently installed packages from composer.lock
+    fn load_installed_packages(&self) -> Vec<Arc<Package>> {
+        let Some(lock) = &self.composer.composer_lock else {
+            return Vec::new();
+        };
+
+        let no_dev = self.composer.installation_manager.config().no_dev;
+
+        let mut packages: Vec<Arc<Package>> = lock.packages.iter()
+            .map(|lp| Arc::new(Package::from(lp)))
+            .collect();
+
+        if !no_dev {
+            packages.extend(lock.packages_dev.iter().map(|lp| Arc::new(Package::from(lp))));
+        }
+
+        packages
     }
 }
 

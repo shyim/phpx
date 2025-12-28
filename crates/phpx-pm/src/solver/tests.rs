@@ -3,6 +3,7 @@
 //! These tests validate the SAT-based dependency resolver behaves correctly
 //! for various package resolution scenarios.
 
+use std::sync::Arc;
 use super::*;
 use crate::package::Package;
 
@@ -29,11 +30,36 @@ fn pkg_with_replaces(name: &str, version: &str, replaces: Vec<(&str, &str)>) -> 
     p
 }
 
-/// Check that the solver result matches expected operations
+/// Create a Transaction from a SolverResult using the request's locked packages as present.
+fn make_transaction(solver_result: &SolverResult, request: &Request) -> Transaction {
+    // Build present packages from locked packages in the request.
+    // Exclude fixed packages since they represent platform packages that
+    // should never generate operations (they're immutable).
+    let present_packages: Vec<Arc<Package>> = request.locked_packages
+        .iter()
+        .filter(|pkg| !request.is_fixed(&pkg.name))
+        .cloned()
+        .collect();
+
+    // Create transaction by comparing present with result
+    Transaction::from_packages(
+        present_packages,
+        solver_result.packages.clone(),
+        solver_result.aliases.clone(),
+    )
+}
+
+/// Check that the solver result matches expected operations.
+///
+/// This creates a Transaction by comparing present packages (from locked packages in the request)
+/// with the solver's result packages, matching Composer's Transaction architecture.
 fn check_solver_result(
-    transaction: &Transaction,
+    solver_result: &SolverResult,
+    request: &Request,
     expected: Vec<(&str, &str, &str)>, // (job, package_name, version)
 ) {
+    let transaction = make_transaction(solver_result, request);
+
     let mut actual: Vec<(String, String, String)> = Vec::new();
 
     for op in &transaction.operations {
@@ -95,8 +121,8 @@ fn test_solver_install_single() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
-    check_solver_result(&transaction, vec![
+    let solver_result = result.unwrap();
+    check_solver_result(&solver_result, &request, vec![
         ("install", "a", "1.0.0"),
     ]);
 }
@@ -116,8 +142,8 @@ fn test_solver_remove_if_not_requested() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
-    check_solver_result(&transaction, vec![
+    let solver_result = result.unwrap();
+    check_solver_result(&solver_result, &request, vec![
         ("remove", "a", "1.0.0"),
     ]);
 }
@@ -140,7 +166,8 @@ fn test_solver_install_with_deps() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should install B 1.0.0 (not 1.1.0) and A 1.0.0
     let installs: Vec<_> = transaction.installs().collect();
@@ -170,7 +197,8 @@ fn test_solver_install_with_deps_in_order() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // After sorting, A should be installed before C, C before B
     let install_names: Vec<String> = transaction.installs().map(|p| p.name.clone()).collect();
@@ -197,7 +225,8 @@ fn test_solver_update_single() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should update A from 1.0.0 to 1.1.0
     let updates: Vec<_> = transaction.updates().collect();
@@ -221,7 +250,8 @@ fn test_solver_update_current_no_change() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // No changes needed - same version
     assert!(transaction.is_empty(), "Transaction should be empty when already at correct version");
@@ -244,7 +274,8 @@ fn test_solver_update_constrained() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should update to 1.2.0, not 2.0.0
     let updates: Vec<_> = transaction.updates().collect();
@@ -278,7 +309,8 @@ fn test_solver_three_alternative_require_and_conflict() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should install B 1.0.0 (the middle version)
     let b_pkg = transaction.installs().find(|p| p.name == "b").expect("B should be installed");
@@ -329,7 +361,8 @@ fn test_solver_obsolete_replaced() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should remove A and install B
     let removes: Vec<_> = transaction.removals().collect();
@@ -361,7 +394,8 @@ fn test_skip_replacer_of_existing_package() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should install B, not Q
     let installs: Vec<_> = transaction.installs().collect();
@@ -395,7 +429,8 @@ fn test_skip_replaced_package_if_replacer_is_selected() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should install Q, not B (since Q is explicitly required and replaces B)
     let installs: Vec<_> = transaction.installs().collect();
@@ -428,7 +463,8 @@ fn test_install_circular_require() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should handle circular dependencies");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
     assert_eq!(installs.len(), 2);
 
@@ -457,7 +493,8 @@ fn test_solver_prefer_highest() {
     let result = solver.solve(&request);
     assert!(result.is_ok());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installed: Vec<_> = transaction.installs().collect();
     assert_eq!(installed.len(), 1);
     assert_eq!(installed[0].version, "3.0.0", "Should prefer highest version");
@@ -479,7 +516,8 @@ fn test_solver_prefer_lowest() {
     let result = solver.solve(&request);
     assert!(result.is_ok());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installed: Vec<_> = transaction.installs().collect();
     assert_eq!(installed.len(), 1);
     assert_eq!(installed[0].version, "1.0.0", "Should prefer lowest version");
@@ -509,7 +547,8 @@ fn test_solver_pick_older_if_newer_conflicts() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Should install A 2.0.0 (not 2.1.0 which needs B 2.2)
     let a_pkg = transaction.installs().find(|p| p.name == "a").expect("A should be installed");
@@ -536,7 +575,8 @@ fn test_solver_fix_locked() {
     let result = solver.solve(&request);
     assert!(result.is_ok());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     // Fixed package shouldn't be changed or removed
     assert!(transaction.is_empty());
 }
@@ -584,7 +624,8 @@ fn test_solver_deep_dependency_chain() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should resolve deep dependency chain");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
     assert_eq!(installs.len(), 5, "Should install all 5 packages");
 }
@@ -608,7 +649,8 @@ fn test_solver_diamond_dependency() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should resolve diamond dependency");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
     assert_eq!(installs.len(), 4, "Should install A, B, C, D");
 
@@ -647,7 +689,8 @@ fn test_solver_all_jobs() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // Check we have the expected operations
     let removes: Vec<_> = transaction.removals().collect();
@@ -693,7 +736,8 @@ fn test_use_replacer_if_necessary() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Solver should find a solution");
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // D 1.1 should be installed (highest version)
@@ -706,7 +750,6 @@ fn test_use_replacer_if_necessary() {
 // ============================================================================
 
 use crate::package::AliasPackage;
-use std::sync::Arc;
 
 /// Test recursive alias dependencies
 /// Ported from testInstallRecursiveAliasDependencies
@@ -748,7 +791,8 @@ fn test_install_recursive_alias_dependencies() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution using alias: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Should install A 2.0 (the base package) and B 2.0
@@ -802,7 +846,8 @@ fn test_install_dev_alias() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution with dev alias: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Should install A 2.0
@@ -899,7 +944,8 @@ fn test_install_root_aliases_if_alias_of_is_installed() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // All three base packages should be installed
     let installs: Vec<_> = transaction.installs().collect();
@@ -951,7 +997,8 @@ fn test_solver_install_honours_not_equal_operator() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Should install B 1.1 (highest that satisfies <=1.3, !=1.3, !=1.2)
@@ -987,7 +1034,8 @@ fn test_solver_update_does_only_update() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let updates: Vec<_> = transaction.updates().collect();
 
     assert_eq!(updates.len(), 1, "Should have exactly one update");
@@ -1027,7 +1075,8 @@ fn test_solver_update_all() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let updates: Vec<_> = transaction.updates().collect();
 
     assert_eq!(updates.len(), 2, "Should have two updates");
@@ -1071,7 +1120,8 @@ fn test_solver_update_only_updates_selected_package() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let updates: Vec<_> = transaction.updates().collect();
 
     assert_eq!(updates.len(), 1, "Should have exactly one update");
@@ -1104,7 +1154,8 @@ fn test_solver_obsolete() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     let removes: Vec<_> = transaction.uninstalls().collect();
     assert_eq!(removes.len(), 1, "Should remove one package");
@@ -1155,7 +1206,8 @@ fn test_install_alternative_with_circular_require() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     assert_eq!(installs.len(), 3, "Should install 3 packages");
@@ -1192,7 +1244,8 @@ fn test_learn_literals_with_sorted_rule_literals() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Should install twig 1.6 (highest < 2.0) and twig-bridge 2.0
@@ -1310,7 +1363,8 @@ fn test_solver_update_fully_constrained_prunes_installed_packages() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // removals() returns only explicit Uninstall operations (not Update from packages)
     let removes: Vec<_> = transaction.removals().collect();
@@ -1343,7 +1397,8 @@ fn test_install_one_of_two_alternatives() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     assert_eq!(installs.len(), 1, "Should install exactly one package");
@@ -1371,7 +1426,8 @@ fn test_solver_fix_locked_with_alternative() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     assert!(transaction.installs().next().is_none(), "Should have no installs");
     assert!(transaction.updates().next().is_none(), "Should have no updates");
     assert!(transaction.uninstalls().next().is_none(), "Should have no uninstalls");
@@ -1397,7 +1453,8 @@ fn test_solver_install_same_package_from_different_repositories() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     assert_eq!(installs.len(), 1, "Should install exactly one package");
@@ -1461,7 +1518,8 @@ fn test_learn_positive_literal() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Check that a valid solution was found
@@ -1587,7 +1645,8 @@ fn test_issue_265_with_dev_stability() {
     // With minimum-stability: dev, solver should find a solution
     assert!(result.is_ok(), "Solver should find a solution with dev stability: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Verify the solution contains expected packages
@@ -1702,7 +1761,8 @@ fn test_solver_multi_package_name_version_resolution_depends_on_require_order() 
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Should install PHP 8.0.10 (highest) and matching ext-foobar
@@ -1721,7 +1781,8 @@ fn test_solver_multi_package_name_version_resolution_depends_on_require_order() 
     let result2 = solver.solve(&request2);
     assert!(result2.is_ok(), "Should find solution with reversed order: {:?}", result2.err());
 
-    let transaction2 = result2.unwrap();
+    let solver_result2 = result2.unwrap();
+    let transaction2 = make_transaction(&solver_result2, &request2);
     let installs2: Vec<_> = transaction2.installs().collect();
 
     // Should install PHP 7.4.23 and matching ext-foobar
@@ -1767,7 +1828,8 @@ fn test_solver_multi_package_name_version_resolution_independent_of_require_orde
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let installs: Vec<_> = transaction.installs().collect();
 
     // Should install PHP 8.0 (highest)
@@ -1784,7 +1846,8 @@ fn test_solver_multi_package_name_version_resolution_independent_of_require_orde
     let result2 = solver.solve(&request2);
     assert!(result2.is_ok(), "Should find solution: {:?}", result2.err());
 
-    let transaction2 = result2.unwrap();
+    let solver_result2 = result2.unwrap();
+    let transaction2 = make_transaction(&solver_result2, &request2);
     let installs2: Vec<_> = transaction2.installs().collect();
 
     // Should still install PHP 8.0
@@ -1814,7 +1877,8 @@ fn test_solver_update_constrained_only() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let updates: Vec<_> = transaction.updates().collect();
 
     assert_eq!(updates.len(), 1, "Should have exactly one update");
@@ -1842,7 +1906,8 @@ fn test_solver_update_fully_constrained() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     let updates: Vec<_> = transaction.updates().collect();
 
     assert_eq!(updates.len(), 1, "Should have exactly one update");
@@ -1869,7 +1934,8 @@ fn test_solver_update_current() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
 
     // No changes needed - same version already installed
     assert!(transaction.is_empty(), "Transaction should be empty when already at correct version");
@@ -1896,6 +1962,526 @@ fn test_solver_fix_locked_only() {
     let result = solver.solve(&request);
     assert!(result.is_ok(), "Should find solution: {:?}", result.err());
 
-    let transaction = result.unwrap();
+    let solver_result = result.unwrap();
+    let transaction = make_transaction(&solver_result, &request);
     assert!(transaction.is_empty(), "Transaction should be empty when fixing locked package");
+}
+
+/// Test that caret constraint correctly excludes major version upgrades.
+///
+/// This is a regression test for the webmozart/assert issue where:
+/// - Package X requires webmozart/assert ^1.11 (should match 1.11.x, 1.12.x but NOT 2.x)
+/// - Installed: webmozart/assert 1.12.1
+/// - Available: 1.9.1, 1.10.0, 1.11.0, 1.12.1, 2.0.0
+/// - Expected: Keep 1.12.1 (not downgrade to 1.11.0 or upgrade to 2.0.0)
+///
+/// The bug was that the solver was selecting 2.0.0 as "best" and then falling back
+/// to 1.11.0 when 2.0.0 caused a conflict, instead of selecting 1.12.1.
+#[test]
+fn test_caret_constraint_excludes_major_upgrade() {
+    // Note: enable trace logging with RUST_LOG=trace when running tests
+
+    let mut pool = Pool::new();
+
+    // Package A requires webmozart/assert ^1.11
+    pool.add_package(pkg_with_requires("a", "1.0.0", vec![("webmozart/assert", "^1.11")]));
+
+    // webmozart/assert versions - note that 2.0.0 should NOT match ^1.11
+    pool.add_package(Package::new("webmozart/assert", "1.9.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.10.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.11.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.12.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "2.0.0.0"));
+
+    let policy = Policy::new();
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+    // Simulate already having 1.12.1 installed
+    request.lock(Package::new("webmozart/assert", "1.12.1.0"));
+
+    let result = solver.solve(&request);
+    assert!(result.is_ok(), "Should find solution: {:?}", result.err());
+
+    let solver_result = result.unwrap();
+
+    // Find the webmozart/assert package in the result
+    let assert_pkg = solver_result.packages.iter()
+        .find(|p| p.name == "webmozart/assert")
+        .expect("webmozart/assert should be in result");
+
+    // The solver should keep 1.12.1.0 (already installed, matches ^1.11)
+    // or select the highest matching version (1.12.1.0)
+    // It should NOT select 2.0.0.0 (doesn't match ^1.11)
+    // It should NOT downgrade to 1.11.0.0 (1.12.1.0 is better)
+    assert!(
+        assert_pkg.version == "1.12.1.0",
+        "webmozart/assert should be 1.12.1.0 (highest matching ^1.11), got {}",
+        assert_pkg.version
+    );
+}
+
+/// Same as above but with a fresh install (no locked package)
+#[test]
+fn test_caret_constraint_selects_highest_matching_fresh() {
+    // Note: enable trace logging with RUST_LOG=trace when running tests
+
+    let mut pool = Pool::new();
+
+    // Package A requires webmozart/assert ^1.11
+    pool.add_package(pkg_with_requires("a", "1.0.0", vec![("webmozart/assert", "^1.11")]));
+
+    // webmozart/assert versions
+    pool.add_package(Package::new("webmozart/assert", "1.9.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.10.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.11.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.12.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "2.0.0.0"));
+
+    let policy = Policy::new();
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+
+    let result = solver.solve(&request);
+    assert!(result.is_ok(), "Should find solution: {:?}", result.err());
+
+    let solver_result = result.unwrap();
+
+    // Find the webmozart/assert package in the result
+    let assert_pkg = solver_result.packages.iter()
+        .find(|p| p.name == "webmozart/assert")
+        .expect("webmozart/assert should be in result");
+
+    // The solver should select the highest matching version (1.12.1.0)
+    // NOT 2.0.0.0 (doesn't match ^1.11)
+    assert!(
+        assert_pkg.version == "1.12.1.0",
+        "webmozart/assert should be 1.12.1.0 (highest matching ^1.11), got {}",
+        assert_pkg.version
+    );
+}
+
+/// Test with multiple packages requiring webmozart/assert with different constraints.
+/// This simulates a more realistic scenario where:
+/// - Package A requires webmozart/assert ^1.11
+/// - Package B requires webmozart/assert ^1.9
+///
+/// Both constraints must be satisfied.
+#[test]
+fn test_caret_constraint_with_multiple_requirers() {
+    // Note: enable trace logging with RUST_LOG=trace when running tests
+
+    let mut pool = Pool::new();
+
+    // Package A requires webmozart/assert ^1.11
+    pool.add_package(pkg_with_requires("a", "1.0.0", vec![("webmozart/assert", "^1.11")]));
+
+    // Package B requires webmozart/assert ^1.9
+    pool.add_package(pkg_with_requires("b", "1.0.0", vec![("webmozart/assert", "^1.9")]));
+
+    // webmozart/assert versions
+    pool.add_package(Package::new("webmozart/assert", "1.9.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.10.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.11.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.12.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "2.0.0.0"));
+
+    let policy = Policy::new();
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+    request.require("b", "*");
+
+    let result = solver.solve(&request);
+    assert!(result.is_ok(), "Should find solution: {:?}", result.err());
+
+    let solver_result = result.unwrap();
+
+    // Find the webmozart/assert package in the result
+    let assert_pkg = solver_result.packages.iter()
+        .find(|p| p.name == "webmozart/assert")
+        .expect("webmozart/assert should be in result");
+
+    // The solver should select the highest version that matches BOTH constraints
+    // A needs ^1.11 (1.11.x, 1.12.x), B needs ^1.9 (1.9.x, 1.10.x, 1.11.x, 1.12.x)
+    // The intersection is 1.11.x, 1.12.x
+    // So 1.12.1.0 should be selected (highest in intersection)
+    // 2.0.0.0 doesn't match ^1.11, so it should NOT be selected
+    assert!(
+        assert_pkg.version == "1.12.1.0",
+        "webmozart/assert should be 1.12.1.0 (highest matching both ^1.11 and ^1.9), got {}",
+        assert_pkg.version
+    );
+}
+
+/// Test that locked packages are preferred when not in update allowlist.
+/// This is the webmozart/assert scenario where:
+/// - 1.12.1.0 is locked
+/// - Constraint is ^1.11
+/// - Solver should keep 1.12.1.0 (not downgrade to 1.11.0)
+#[test]
+fn test_locked_packages_preferred_when_not_in_update_allowlist() {
+    let mut pool = Pool::new();
+
+    // Package A requires webmozart/assert ^1.11
+    pool.add_package(pkg_with_requires("a", "1.0.0", vec![("webmozart/assert", "^1.11")]));
+
+    // webmozart/assert versions
+    pool.add_package(Package::new("webmozart/assert", "1.11.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.12.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "2.0.0.0"));
+
+    // Build preferred versions from locked packages (like Composer does)
+    // When webmozart/assert is NOT in the update allowlist, its locked version should be preferred
+    let mut preferred_versions = std::collections::HashMap::new();
+    preferred_versions.insert("webmozart/assert".to_string(), "1.12.1.0".to_string());
+
+    let policy = Policy::new()
+        .preferred_versions(preferred_versions);
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+    // webmozart/assert is locked at 1.12.1.0
+    request.lock(Package::new("webmozart/assert", "1.12.1.0"));
+
+    let result = solver.solve(&request);
+    assert!(result.is_ok(), "Should find solution: {:?}", result.err());
+
+    let solver_result = result.unwrap();
+
+    // Find the webmozart/assert package in the result
+    let assert_pkg = solver_result.packages.iter()
+        .find(|p| p.name == "webmozart/assert")
+        .expect("webmozart/assert should be in result");
+
+    // The solver should prefer the locked version since it matches the constraint
+    // and webmozart/assert is not in the update allowlist
+    assert_eq!(
+        assert_pkg.version, "1.12.1.0",
+        "webmozart/assert should stay at 1.12.1.0 (locked version), not change to {}",
+        assert_pkg.version
+    );
+
+    // Verify there's no update operation (should be a no-op)
+    let transaction = make_transaction(&solver_result, &request);
+    let updates: Vec<_> = transaction.updates().collect();
+    assert!(
+        updates.is_empty() || !updates.iter().any(|(_, to)| to.name == "webmozart/assert"),
+        "Should not update webmozart/assert when locked and not in update allowlist"
+    );
+}
+
+/// Test that packages in update allowlist CAN be updated even if locked.
+/// This is the Composer behavior: update allowlist overrides preferred versions.
+#[test]
+fn test_update_allowlist_allows_upgrade() {
+    let mut pool = Pool::new();
+
+    // Package A requires webmozart/assert ^1.11
+    pool.add_package(pkg_with_requires("a", "1.0.0", vec![("webmozart/assert", "^1.11")]));
+
+    // webmozart/assert versions
+    pool.add_package(Package::new("webmozart/assert", "1.11.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.12.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.12.1.0"));
+
+    // When webmozart/assert IS in the update allowlist, it should NOT be set as preferred
+    // So the solver picks the highest matching version
+    let policy = Policy::new(); // No preferred versions - package is being updated
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+    // webmozart/assert is locked at older version, but we want to update it
+    request.lock(Package::new("webmozart/assert", "1.11.0.0"));
+    request.update(vec!["webmozart/assert".to_string()]);
+
+    let result = solver.solve(&request);
+    assert!(result.is_ok(), "Should find solution: {:?}", result.err());
+
+    let solver_result = result.unwrap();
+
+    // Find the webmozart/assert package in the result
+    let assert_pkg = solver_result.packages.iter()
+        .find(|p| p.name == "webmozart/assert")
+        .expect("webmozart/assert should be in result");
+
+    // The solver should select the highest version since it's in the update allowlist
+    assert_eq!(
+        assert_pkg.version, "1.12.1.0",
+        "webmozart/assert should update to 1.12.1.0 (highest matching ^1.11), got {}",
+        assert_pkg.version
+    );
+
+    // Verify there's an update operation
+    let transaction = make_transaction(&solver_result, &request);
+    let updates: Vec<_> = transaction.updates().collect();
+    assert!(
+        updates.iter().any(|(from, to)| to.name == "webmozart/assert" && from.version == "1.11.0.0" && to.version == "1.12.1.0"),
+        "Should update webmozart/assert from 1.11.0.0 to 1.12.1.0"
+    );
+}
+
+/// Test that major version upgrades are blocked by caret constraint.
+/// Even without locked packages, ^1.11 should never select 2.0.0.
+#[test]
+fn test_caret_constraint_blocks_major_upgrade() {
+    let mut pool = Pool::new();
+
+    // Package A requires webmozart/assert ^1.11
+    pool.add_package(pkg_with_requires("a", "1.0.0", vec![("webmozart/assert", "^1.11")]));
+
+    // webmozart/assert versions - including 2.0.0 which should be blocked
+    pool.add_package(Package::new("webmozart/assert", "1.11.0.0"));
+    pool.add_package(Package::new("webmozart/assert", "1.12.1.0"));
+    pool.add_package(Package::new("webmozart/assert", "2.0.0.0")); // Should NOT be selected
+
+    let policy = Policy::new();
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+
+    let result = solver.solve(&request);
+    assert!(result.is_ok(), "Should find solution: {:?}", result.err());
+
+    let solver_result = result.unwrap();
+
+    // Find the webmozart/assert package in the result
+    let assert_pkg = solver_result.packages.iter()
+        .find(|p| p.name == "webmozart/assert")
+        .expect("webmozart/assert should be in result");
+
+    // Must select 1.12.1.0, NOT 2.0.0.0
+    assert_eq!(
+        assert_pkg.version, "1.12.1.0",
+        "webmozart/assert should be 1.12.1.0 (highest matching ^1.11), not {}. \
+         Version 2.0.0.0 should be blocked by caret constraint.",
+        assert_pkg.version
+    );
+}
+
+// ============================================================================
+// Additional Tests ported from Composer's SolverTest.php
+// These tests validate compatibility with Composer's dependency resolution
+// ============================================================================
+
+/// Port of testInstallCircularRequire
+/// Test circular dependencies work correctly
+#[test]
+fn test_composer_install_circular_require() {
+    let mut pool = Pool::new();
+
+    // A requires B >= 1.0
+    let mut pkg_a = pkg("a", "1.0.0");
+    pkg_a.require.insert("b".to_string(), ">=1.0".to_string());
+    pool.add_package(pkg_a);
+
+    // B 0.9 doesn't require A
+    pool.add_package(pkg("b", "0.9.0"));
+
+    // B 1.1 requires A >= 1.0 (circular)
+    let mut pkg_b = pkg("b", "1.1.0");
+    pkg_b.require.insert("a".to_string(), ">=1.0".to_string());
+    pool.add_package(pkg_b);
+
+    let policy = Policy::new();
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+
+    let result = solver.solve(&request);
+    assert!(result.is_ok(), "Should find solution for circular deps: {:?}", result.err());
+
+    let solver_result = result.unwrap();
+    // Should install both A 1.0 and B 1.1 (with circular requirement)
+    let a_pkg = solver_result.packages.iter().find(|p| p.name == "a");
+    let b_pkg = solver_result.packages.iter().find(|p| p.name == "b");
+    assert!(a_pkg.is_some(), "A should be installed");
+    assert!(b_pkg.is_some(), "B should be installed");
+    assert_eq!(b_pkg.unwrap().version, "1.1.0", "B should be 1.1.0 (highest matching >=1.0)");
+}
+
+/// Port of testConflictResultEmpty
+/// Two packages that conflict should cause solver error
+#[test]
+fn test_composer_conflict_result_empty() {
+    let mut pool = Pool::new();
+
+    // A conflicts with B
+    let mut pkg_a = pkg("a", "1.0.0");
+    pkg_a.conflict.insert("b".to_string(), ">=1.0".to_string());
+    pool.add_package(pkg_a);
+
+    pool.add_package(pkg("b", "1.0.0"));
+
+    let policy = Policy::new();
+    let solver = Solver::new(&pool, &policy);
+
+    let mut request = Request::new();
+    request.require("a", "*");
+    request.require("b", "*");
+
+    let result = solver.solve(&request);
+    assert!(result.is_err(), "Should fail due to conflict between A and B");
+}
+
+// ============================================================================
+// Tests ported from Composer's DefaultPolicyTest.php
+// These tests validate version selection policy behavior
+// ============================================================================
+
+/// Port of testSelectNewest
+/// Policy should select newest version
+#[test]
+fn test_policy_select_newest() {
+    let mut pool = Pool::new();
+    pool.add_package(pkg("a", "1.0.0"));
+    pool.add_package(pkg("a", "2.0.0"));
+
+    let policy = Policy::new();
+    let candidates: Vec<_> = pool.packages_by_name("a");
+
+    let selected = policy.select_preferred(&pool, &candidates);
+    assert!(!selected.is_empty(), "Should select at least one package");
+
+    let selected_pkg = pool.package(selected[0]).unwrap();
+    assert_eq!(selected_pkg.version, "2.0.0", "Should select newest version");
+}
+
+/// Port of testSelectLowest
+/// Policy with prefer_lowest should select oldest version
+#[test]
+fn test_policy_select_lowest() {
+    let mut pool = Pool::new();
+    pool.add_package(pkg("a", "1.0.0"));
+    pool.add_package(pkg("a", "2.0.0"));
+
+    let policy = Policy::new().prefer_lowest(true);
+    let candidates: Vec<_> = pool.packages_by_name("a");
+
+    let selected = policy.select_preferred(&pool, &candidates);
+    assert!(!selected.is_empty(), "Should select at least one package");
+
+    let selected_pkg = pool.package(selected[0]).unwrap();
+    assert_eq!(selected_pkg.version, "1.0.0", "Should select lowest version when prefer_lowest is true");
+}
+
+/// Port of testSelectNewestPicksLatestStableWithPreferStable
+/// Policy with prefer_stable should prefer stable over alpha
+#[test]
+fn test_policy_prefer_stable() {
+    let mut pool = Pool::new();
+    pool.add_package(pkg("a", "1.0.0"));
+    pool.add_package(pkg("a", "1.0.1-alpha"));
+
+    let policy = Policy::new().prefer_stable(true);
+    let candidates: Vec<_> = pool.packages_by_name("a");
+
+    let selected = policy.select_preferred(&pool, &candidates);
+    assert!(!selected.is_empty(), "Should select at least one package");
+
+    let selected_pkg = pool.package(selected[0]).unwrap();
+    assert_eq!(selected_pkg.version, "1.0.0", "Should prefer stable 1.0.0 over alpha 1.0.1-alpha");
+}
+
+/// Port of testSelectNewestWithDevPicksNonDev
+/// Policy should prefer non-dev over dev versions
+#[test]
+fn test_policy_prefer_non_dev_over_dev() {
+    use crate::package::Stability;
+
+    let mut pool = Pool::with_minimum_stability(Stability::Dev);
+    pool.add_package(pkg("a", "dev-master"));
+    pool.add_package(pkg("a", "1.0.0"));
+
+    let policy = Policy::new();
+    let candidates: Vec<_> = pool.packages_by_name("a");
+
+    let selected = policy.select_preferred(&pool, &candidates);
+    assert!(!selected.is_empty(), "Should select at least one package");
+
+    let selected_pkg = pool.package(selected[0]).unwrap();
+    assert_eq!(selected_pkg.version, "1.0.0", "Should prefer stable 1.0.0 over dev-master");
+}
+
+/// Port of testSelectNewestWithPreferredVersionPicksPreferredVersionIfAvailable
+/// Preferred versions from lock file should be respected
+#[test]
+fn test_policy_preferred_version_selected() {
+    let mut pool = Pool::new();
+    pool.add_package(pkg("a", "1.0.0"));
+    pool.add_package(pkg("a", "1.1.0"));
+    pool.add_package(pkg("a", "1.2.0"));
+
+    // Prefer 1.1.0 (simulating lock file preference)
+    let mut preferred = std::collections::HashMap::new();
+    preferred.insert("a".to_string(), "1.1.0".to_string());
+
+    let policy = Policy::new().preferred_versions(preferred);
+    let candidates: Vec<_> = pool.packages_by_name("a");
+
+    let selected = policy.select_preferred(&pool, &candidates);
+    assert!(!selected.is_empty(), "Should select at least one package");
+
+    let selected_pkg = pool.package(selected[0]).unwrap();
+    assert_eq!(selected_pkg.version, "1.1.0", "Should select preferred version 1.1.0 from lock file");
+}
+
+/// Port of testSelectNewestWithPreferredVersionPicksNewestOtherwise
+/// When preferred version doesn't exist, fall back to newest
+#[test]
+fn test_policy_preferred_version_not_available_falls_back() {
+    let mut pool = Pool::new();
+    pool.add_package(pkg("a", "1.0.0"));
+    pool.add_package(pkg("a", "1.2.0"));
+
+    // Prefer 1.1.0 but it doesn't exist
+    let mut preferred = std::collections::HashMap::new();
+    preferred.insert("a".to_string(), "1.1.0".to_string());
+
+    let policy = Policy::new().preferred_versions(preferred);
+    let candidates: Vec<_> = pool.packages_by_name("a");
+
+    let selected = policy.select_preferred(&pool, &candidates);
+    assert!(!selected.is_empty(), "Should select at least one package");
+
+    let selected_pkg = pool.package(selected[0]).unwrap();
+    assert_eq!(selected_pkg.version, "1.2.0", "Should fall back to newest when preferred not available");
+}
+
+/// Port of testRepositoryOrderingAffectsPriority
+/// Packages from earlier repositories should be preferred
+#[test]
+fn test_policy_repository_priority() {
+    let mut pool = Pool::new();
+
+    // repo1 has 1.0 and 1.1
+    pool.add_package_from_repo(pkg("a", "1.0.0"), Some("repo1"));
+    pool.add_package_from_repo(pkg("a", "1.1.0"), Some("repo1"));
+
+    // repo2 has 1.1 and 1.2
+    pool.add_package_from_repo(pkg("a", "1.1.0"), Some("repo2"));
+    pool.add_package_from_repo(pkg("a", "1.2.0"), Some("repo2"));
+
+    // repo1 has higher priority
+    pool.set_priority("repo1", 0);
+    pool.set_priority("repo2", 1);
+
+    let policy = Policy::new();
+    let candidates: Vec<_> = pool.packages_by_name("a");
+
+    let selected = policy.select_preferred(&pool, &candidates);
+    assert!(!selected.is_empty(), "Should select at least one package");
+
+    // Should select 1.1.0 from repo1 (highest version in highest priority repo)
+    let selected_pkg = pool.package(selected[0]).unwrap();
+    assert_eq!(selected_pkg.version, "1.1.0",
+        "Should select highest version from highest priority repo");
 }

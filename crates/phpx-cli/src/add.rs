@@ -138,9 +138,14 @@ pub async fn execute(args: AddArgs) -> Result<i32> {
         // Run Installer
         let installer = Installer::new(composer);
 
+        let new_packages: Vec<String> = args.packages.iter()
+            .map(|spec| parse_package_spec(spec).0)
+            .collect();
+
         installer.update(
             args.optimize_autoloader,
-            false, // update_lock_only
+            false,
+            Some(new_packages),
         ).await
     } else {
         println!("{} Packages added to composer.json", style("Success:").green().bold());

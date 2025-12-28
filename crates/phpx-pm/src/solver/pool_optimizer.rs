@@ -102,10 +102,7 @@ impl<'a> PoolOptimizer<'a> {
         self.apply_removals_to_pool(pool)
     }
 
-    /// Pre-warm caches by parsing all constraints and normalizing all versions upfront.
-    /// This avoids repeated parsing during the hot loop.
     /// Pre-warm caches by parsing all unique constraints upfront.
-    /// Version normalization is done lazily to avoid processing unused packages.
     fn prewarm_caches(&mut self, _pool: &Pool) {
         // Collect all unique constraint strings
         let mut all_constraints: HashSet<String> = HashSet::new();
@@ -472,11 +469,9 @@ impl<'a> PoolOptimizer<'a> {
                 for dep_hash in dep_hashes {
                     let packages = &dep_hash_groups[dep_hash];
                     if packages.len() == 1 {
-                        // Only one package in this group, must keep it
                         self.keep_package(pool, packages[0]);
                     } else {
-                        // Multiple packages with same deps - keep the preferred one
-                        let preferred = self.policy.select_preferred(pool, packages);
+                        let preferred = self.policy.select_preferred_for_optimization(pool, packages);
                         for &pkg_id in &preferred {
                             self.keep_package(pool, pkg_id);
                         }
@@ -732,7 +727,7 @@ impl<'a> PoolOptimizer<'a> {
         }
 
         // Log what versions of key packages are being kept
-        for key in &["symfony/console", "symfony/http-kernel", "symfony/string", "symfony/event-dispatcher"] {
+        for key in &["symfony/console", "symfony/http-kernel", "symfony/string", "symfony/event-dispatcher", "webmozart/assert"] {
             if let Some(&(total, removed)) = pkg_counts.get(*key) {
                 log::debug!("Pool optimizer: {} - kept {}/{} versions", key, total - removed, total);
             }

@@ -1,5 +1,7 @@
 //! Conversions between Package and LockedPackage types.
 
+use phpx_semver::VersionParser;
+
 use super::{Autoload, AutoloadPath, Dist, Package, Source};
 use crate::json::{
     LockAutoload, LockDist, LockSource, LockedPackage,
@@ -7,7 +9,12 @@ use crate::json::{
 
 impl From<&LockedPackage> for Package {
     fn from(lp: &LockedPackage) -> Self {
-        let mut pkg = Package::new(&lp.name, &lp.version);
+        let normalized_version = VersionParser::new()
+            .normalize(&lp.version)
+            .unwrap_or_else(|_| lp.version.clone());
+
+        let mut pkg = Package::new(&lp.name, &normalized_version);
+        pkg.pretty_version = Some(lp.version.clone());
         pkg.description = lp.description.clone();
         pkg.homepage = lp.homepage.clone();
         pkg.license = lp.license.clone();
@@ -188,7 +195,8 @@ mod tests {
 
         let pkg = Package::from(&locked);
         assert_eq!(pkg.name, "vendor/package");
-        assert_eq!(pkg.version, "1.0.0");
+        assert_eq!(pkg.version, "1.0.0.0");
+        assert_eq!(pkg.pretty_version, Some("1.0.0".to_string()));
         assert_eq!(pkg.description, Some("A test package".to_string()));
     }
 

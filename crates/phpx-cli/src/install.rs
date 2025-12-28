@@ -142,7 +142,8 @@ pub async fn execute(args: InstallArgs) -> Result<i32> {
     if run_update {
         installer.update(
             args.optimize_autoloader,
-            false  // update_lock_only
+            false,
+            None,
         ).await
     } else {
         installer.install(

@@ -662,24 +662,24 @@ impl Pool {
             return true;
         };
 
-        // Create a version constraint (== normalized_version)
-        // Use cached version constraint if available
         let binding = self.version_constraints.borrow();
-        if let Some(cached) = binding.get(&id) {
+        let result = if let Some(cached) = binding.get(&id) {
             match cached {
                 Some(vc) => parsed_constraint.matches(vc),
                 None => true, // Invalid version, permissive
             }
         } else {
             drop(binding);
-            let vc = Constraint::new(Operator::Equal, normalized_version).ok();
+            let vc = Constraint::new(Operator::Equal, normalized_version.clone()).ok();
             let matches = match &vc {
                 Some(c) => parsed_constraint.matches(c),
                 None => true,
             };
             self.version_constraints.borrow_mut().insert(id, vc);
             matches
-        }
+        };
+
+        result
     }
 
     /// Get the total number of packages (excluding placeholder)
@@ -944,6 +944,33 @@ mod tests {
 
         // Test <2.0 - should match 1.0.0 and 1.5.0
         let matches = pool.what_provides("vendor/pkg", Some("<2.0"));
+        assert_eq!(matches.len(), 2);
+    }
+
+    /// Test case for webmozart/assert scenario - ^1.11 should not match 2.0.0
+    #[test]
+    fn test_constraint_matching_caret_major_boundary() {
+        let mut pool = Pool::new();
+        pool.add_package(Package::new("webmozart/assert", "1.9.1.0"));
+        pool.add_package(Package::new("webmozart/assert", "1.10.0.0"));
+        pool.add_package(Package::new("webmozart/assert", "1.11.0.0"));
+        pool.add_package(Package::new("webmozart/assert", "1.12.1.0"));
+        pool.add_package(Package::new("webmozart/assert", "2.0.0.0"));
+
+        // Test ^1.11 - should match 1.11.0.0 and 1.12.1.0, but NOT 2.0.0.0
+        let matches = pool.what_provides("webmozart/assert", Some("^1.11"));
+        let versions: Vec<_> = matches.iter()
+            .filter_map(|&id| pool.package(id).map(|p| p.version.clone()))
+            .collect();
+
+        assert!(versions.contains(&"1.11.0.0".to_string()), "^1.11 should match 1.11.0.0");
+        assert!(versions.contains(&"1.12.1.0".to_string()), "^1.11 should match 1.12.1.0");
+        assert!(!versions.contains(&"2.0.0.0".to_string()), "^1.11 should NOT match 2.0.0.0");
+        assert!(!versions.contains(&"1.10.0.0".to_string()), "^1.11 should NOT match 1.10.0.0");
+        assert!(!versions.contains(&"1.9.1.0".to_string()), "^1.11 should NOT match 1.9.1.0");
+
+        // Exactly 2 versions should match
+        assert_eq!(matches.len(), 2, "Expected 2 versions to match ^1.11, got {:?}", versions);
         assert_eq!(matches.len(), 2);
     }
 

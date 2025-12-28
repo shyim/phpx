@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
 use super::decisions::Decisions;
-use super::pool::{Pool, PackageId};
+use super::pool::{Pool, PackageId, PoolEntry};
 use super::pool_optimizer::PoolOptimizer;
 use super::policy::Policy;
 use super::problem::{Problem, ProblemSet};
@@ -7,8 +9,32 @@ use super::request::Request;
 use super::rule::{Literal, Rule, RuleType};
 use super::rule_generator::RuleGenerator;
 use super::rule_set::RuleSet;
-use super::transaction::Transaction;
 use super::watch_graph::{WatchGraph, Propagator, PropagateResult};
+
+use crate::package::{AliasPackage, Package};
+
+/// Result of dependency resolution.
+///
+/// Contains the packages that should be installed according to the solver.
+/// The caller should compare this with currently installed packages to
+/// generate the actual operations (using Transaction::from_packages).
+#[derive(Debug, Clone, Default)]
+pub struct SolverResult {
+    /// Packages that should be installed (the complete resolved set)
+    pub packages: Vec<Arc<Package>>,
+    /// Alias packages that should be marked as installed
+    pub aliases: Vec<Arc<AliasPackage>>,
+}
+
+impl SolverResult {
+    /// Create a new empty solver result
+    pub fn new() -> Self {
+        Self {
+            packages: Vec::new(),
+            aliases: Vec::new(),
+        }
+    }
+}
 
 /// The main SAT solver for dependency resolution.
 ///
@@ -44,8 +70,12 @@ impl<'a> Solver<'a> {
 
     /// Solve the dependency resolution problem.
     ///
-    /// Returns a Transaction on success, or a ProblemSet explaining failures.
-    pub fn solve(&self, request: &Request) -> Result<Transaction, ProblemSet> {
+    /// Returns a SolverResult containing packages that should be installed,
+    /// or a ProblemSet explaining failures.
+    ///
+    /// The caller should use Transaction::from_packages() to compare the result
+    /// with currently installed packages and generate the actual operations.
+    pub fn solve(&self, request: &Request) -> Result<SolverResult, ProblemSet> {
         log::debug!("Building pool with {} packages", self.pool.len());
 
         if self.optimize_pool {
@@ -69,7 +99,7 @@ impl<'a> Solver<'a> {
     }
 
     /// Internal solve method that works with any pool reference.
-    fn solve_with_pool(&self, pool: &Pool, request: &Request) -> Result<Transaction, ProblemSet> {
+    fn solve_with_pool(&self, pool: &Pool, request: &Request) -> Result<SolverResult, ProblemSet> {
         log::debug!("Generating rules");
         let start = std::time::Instant::now();
 
@@ -92,8 +122,8 @@ impl<'a> Solver<'a> {
                 log::info!("Dependency resolution completed in {:.3} seconds", elapsed.as_secs_f64());
                 log::info!("Analyzed {} packages to resolve dependencies", pool.len());
                 log::info!("Analyzed {} rules to resolve dependencies", state.rules.len());
-                // Build transaction from decisions
-                Ok(self.build_transaction(&state, pool, request))
+                // Build result from decisions
+                Ok(self.build_result(&state, pool, request))
             }
             Err(problems) => {
                 log::debug!("SAT solving failed in {:?}", sat_start.elapsed());
@@ -102,7 +132,11 @@ impl<'a> Solver<'a> {
         }
     }
 
-    /// Main SAT solving loop
+    /// Main SAT solving loop - follows Composer's approach:
+    /// 1. Propagate decisions
+    /// 2. Fulfill all unresolved rules
+    /// 3. On conflict: use CDCL learning to backtrack
+    /// 4. After solution found: minimization step to try alternatives
     fn run_sat(&self, state: &mut SolverState, pool: &Pool, request: &Request) -> Result<(), ProblemSet> {
         // Process assertion rules first (single-literal rules)
         self.process_assertions(state, pool)?;
@@ -115,119 +149,199 @@ impl<'a> Solver<'a> {
         loop {
             iterations += 1;
             if iterations > MAX_ITERATIONS {
-                // Safety: prevent infinite loops
                 let mut problems = ProblemSet::new();
                 problems.add(Problem::new().with_message("Solver exceeded maximum iterations"));
                 return Err(problems);
             }
-            // Propagate all consequences of current decisions
+
+            // Step 1: Propagate all consequences of current decisions
             if let Err(conflict_rule) = self.propagate(state) {
-                // Conflict found - try alternatives first before CDCL learning
+                // Conflict at level 1 means unsolvable
                 if state.decisions.level() == 1 {
-                    // Conflict at level 1 means unsolvable
                     log::debug!("Conflict at level 1: rule {} is unsolvable", conflict_rule);
-                    if let Some(rule) = state.rules.get(conflict_rule) {
-                        log::debug!("Conflict rule type: {:?}, literals: {:?}", rule.rule_type(), rule.literals());
-                        // Log package names for the conflicting literals
-                        for lit in rule.literals() {
-                            let pkg_id = lit.unsigned_abs() as PackageId;
-                            if let Some(pkg) = pool.package(pkg_id) {
-                                log::debug!("  Package {} = {} {}", pkg_id, pkg.name, pkg.version);
-                            }
-                        }
-                    }
                     let mut problems = ProblemSet::new();
                     problems.add(self.analyze_unsolvable(state, pool, conflict_rule));
                     return Err(problems);
                 }
 
-                // Try to find an alternative at the current or recent branch point
-                let current_level = state.decisions.level();
-                let mut tried_alternative = false;
-
-                // Look for a branch at the current level with alternatives
-                if let Some(branch_idx) = state.branches.iter().position(|b| b.level == current_level && !b.alternatives.is_empty()) {
-                    // Get the first alternative and remove it from the list
-                    let alternative = state.branches[branch_idx].alternatives.remove(0);
-
-                    // Check if this alternative is still undecided and not conflicting
-                    if state.decisions.undecided(alternative) {
-                        // Revert only the decision at this level
-                        state.decisions.revert_to_level(current_level - 1);
-                        state.reset_propagate_index();
-                        state.decisions.increment_level();
-
-                        // Decide to NOT install the previous choice and try the alternative
-                        state.decisions.decide(alternative, None);
-                        tried_alternative = true;
-                    }
-
-                    // Clean up empty branch entries
-                    if state.branches[branch_idx].alternatives.is_empty() {
-                        state.branches.remove(branch_idx);
-                    }
-                }
-
-                if !tried_alternative {
-                    // No alternatives available, use CDCL learning
-                    let (learned_literal, backtrack_level, learned_rule) =
-                        self.analyze_conflict(state, conflict_rule);
-
-                    // Backtrack to appropriate level
-                    state.decisions.revert_to_level(backtrack_level);
-                    state.reset_propagate_index();
-
-                    // Remove branches above backtrack level
-                    state.branches.retain(|b| b.level <= backtrack_level);
-
-                    // Add learned rule if it has literals
-                    if !learned_rule.literals().is_empty() {
-                        let learned_id = state.rules.add(learned_rule);
-                        state.watch_graph.add_rule(state.rules.get(learned_id).unwrap());
-
-                        // Decide the learned literal
-                        state.decisions.decide(learned_literal, Some(learned_id));
-                    }
+                // Use CDCL learning to analyze conflict and backtrack
+                let level = self.analyze_and_backtrack(state, conflict_rule)?;
+                if level == 0 {
+                    return Err(ProblemSet::new());
                 }
                 continue;
             }
 
-            // Find the next undecided package to decide on
+            // Step 2: Find the next undecided package to decide on
             match self.select_next(state, request) {
                 Some((candidates, name)) => {
-                    // Sort by policy preference, considering the required package name
-                    // This allows preferring same-vendor packages and original over replacers
-                    let sorted = self.policy.select_preferred_for_requirement(
-                        pool,
-                        &candidates,
-                        Some(&name),
-                    );
-
-                    if sorted.is_empty() {
-                        continue;
+                    let level = self.select_and_install(state, pool, &candidates, &name)?;
+                    if level == 0 {
+                        return Err(ProblemSet::new());
                     }
-
-                    // Increment decision level for branching
-                    state.decisions.increment_level();
-
-                    // Try the best candidate
-                    let selected = sorted[0];
-
-                    // Record branch point for backtracking
-                    if sorted.len() > 1 {
-                        state.branches.push(Branch {
-                            level: state.decisions.level(),
-                            alternatives: sorted[1..].to_vec(),
-                            name: name.clone(),
-                        });
-                    }
-
-                    // Decide to install the selected package
-                    state.decisions.decide(selected, None);
                 }
                 None => {
                     // No more undecided packages - solution found!
-                    return Ok(());
+                    // Step 3: Minimization - try alternatives to find better solutions
+                    if !self.minimize_solution(state, pool)? {
+                        // No more alternatives to try - we're done
+                        return Ok(());
+                    }
+                    // Minimization made changes, continue solving
+                }
+            }
+        }
+    }
+
+    /// Select and install the best package from candidates.
+    /// Returns the new level, or 0 if unsolvable.
+    fn select_and_install(
+        &self,
+        state: &mut SolverState,
+        pool: &Pool,
+        candidates: &[PackageId],
+        name: &str,
+    ) -> Result<u32, ProblemSet> {
+        // Sort by policy preference
+        let sorted = self.policy.select_preferred_for_requirement(
+            pool,
+            candidates,
+            Some(name),
+        );
+
+        if sorted.is_empty() {
+            return Ok(state.decisions.level());
+        }
+
+        // Select the best candidate
+        let selected = sorted[0];
+
+        // Store alternatives for minimization step
+        if sorted.len() > 1 {
+            state.branches.push(Branch {
+                level: state.decisions.level(),
+                alternatives: sorted[1..].to_vec(),
+                name: name.to_string(),
+            });
+        }
+
+        // Increment level and make decision
+        state.decisions.increment_level();
+        state.decisions.decide(selected, None);
+
+        // Propagate and handle any conflicts with CDCL
+        loop {
+            match self.propagate(state) {
+                Ok(()) => return Ok(state.decisions.level()),
+                Err(conflict_rule) => {
+                    if state.decisions.level() == 1 {
+                        let mut problems = ProblemSet::new();
+                        problems.add(self.analyze_unsolvable(state, pool, conflict_rule));
+                        return Err(problems);
+                    }
+                    let level = self.analyze_and_backtrack(state, conflict_rule)?;
+                    if level == 0 {
+                        return Ok(0);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Analyze conflict using CDCL and backtrack to appropriate level.
+    /// Returns the new level after backtracking.
+    fn analyze_and_backtrack(
+        &self,
+        state: &mut SolverState,
+        conflict_rule: u32,
+    ) -> Result<u32, ProblemSet> {
+        let (learned_literal, backtrack_level, learned_rule) =
+            self.analyze_conflict(state, conflict_rule);
+
+        if backtrack_level <= 0 || backtrack_level >= state.decisions.level() {
+            // Invalid backtrack level
+            return Ok(0);
+        }
+
+        // Backtrack to appropriate level
+        state.decisions.revert_to_level(backtrack_level);
+        state.reset_propagate_index();
+
+        // Remove branches above backtrack level (matching Composer's revert behavior)
+        state.branches.retain(|b| b.level <= backtrack_level);
+
+        // Add learned rule if it has literals
+        if !learned_rule.literals().is_empty() {
+            let learned_id = state.rules.add(learned_rule);
+            state.watch_graph.add_rule(state.rules.get(learned_id).unwrap());
+
+            // Decide the learned literal
+            state.decisions.decide(learned_literal, Some(learned_id));
+        }
+
+        Ok(backtrack_level)
+    }
+
+    /// Minimization step: try alternatives to find potentially better solutions.
+    /// Returns true if we made changes and should continue solving.
+    fn minimize_solution(&self, state: &mut SolverState, pool: &Pool) -> Result<bool, ProblemSet> {
+        if state.branches.is_empty() {
+            return Ok(false);
+        }
+
+        // Find an alternative that was decided at a level higher than where it was stored
+        // This means a better choice might be available
+        let mut best_alternative: Option<(usize, usize, i32, u32)> = None; // (branch_idx, offset, literal, level)
+
+        for (i, branch) in state.branches.iter().enumerate().rev() {
+            for (offset, &literal) in branch.alternatives.iter().enumerate() {
+                if literal > 0 {
+                    if let Some(decision_level) = state.decisions.decision_level(literal) {
+                        if decision_level > branch.level + 1 {
+                            best_alternative = Some((i, offset, literal, branch.level));
+                        }
+                    }
+                }
+            }
+        }
+
+        let Some((branch_idx, offset, literal, level)) = best_alternative else {
+            return Ok(false);
+        };
+
+        // Remove this alternative from the branch
+        state.branches[branch_idx].alternatives.remove(offset);
+
+        // Clean up empty branches
+        if state.branches[branch_idx].alternatives.is_empty() {
+            state.branches.remove(branch_idx);
+        }
+
+        // Revert to the branch level
+        state.decisions.revert_to_level(level);
+        state.reset_propagate_index();
+
+        // Remove branches at or above this level
+        state.branches.retain(|b| b.level < level);
+
+        // Try the alternative
+        state.decisions.increment_level();
+        state.decisions.decide(literal as PackageId, None);
+
+        // Propagate and handle conflicts
+        loop {
+            match self.propagate(state) {
+                Ok(()) => return Ok(true),
+                Err(conflict_rule) => {
+                    if state.decisions.level() == 1 {
+                        let mut problems = ProblemSet::new();
+                        problems.add(self.analyze_unsolvable(state, pool, conflict_rule));
+                        return Err(problems);
+                    }
+                    let new_level = self.analyze_and_backtrack(state, conflict_rule)?;
+                    if new_level == 0 {
+                        return Ok(false);
+                    }
                 }
             }
         }
@@ -413,77 +527,128 @@ impl<'a> Solver<'a> {
         None
     }
 
-    /// Analyze a conflict to generate a learned clause using first-UIP scheme
+    /// Analyze a conflict to generate a learned clause using first-UIP scheme.
+    /// This follows Composer's approach: walk backwards through decisions to find the UIP.
     fn analyze_conflict(&self, state: &SolverState, conflict_rule_id: u32) -> (Literal, u32, Rule) {
         let current_level = state.decisions.level();
 
-        // Collect all literals involved in the conflict
         let mut seen = std::collections::HashSet::new();
-        let mut learned_literals = Vec::new();
+        let mut num_at_current_level = 0;
+        let mut num_at_level1 = 0;
+        let mut other_learned_literals = Vec::new();
         let mut backtrack_level = 0u32;
-        let mut literals_at_current_level = 0;
+        let mut learned_literal: Option<Literal> = None;
 
-        // Start with the conflicting rule
-        let mut to_process: Vec<Literal> = Vec::new();
+        let decisions = state.decisions.queue();
+        let mut decision_idx = decisions.len();
+        let mut current_rule = state.rules.get(conflict_rule_id);
 
-        if let Some(rule) = state.rules.get(conflict_rule_id) {
-            for &lit in rule.literals() {
-                to_process.push(lit);
-            }
-        }
+        loop {
+            // Process current rule's literals
+            if let Some(rule) = &current_rule {
+                for &lit in rule.literals() {
+                    let pkg_id = lit.unsigned_abs() as PackageId;
 
-        // Process literals - resolution until we have exactly one literal at current level
-        while !to_process.is_empty() {
-            let lit = to_process.pop().unwrap();
-            let pkg_id = lit.unsigned_abs() as PackageId;
+                    // Skip if already seen
+                    if seen.contains(&pkg_id) {
+                        continue;
+                    }
 
-            if seen.contains(&pkg_id) {
-                continue;
-            }
-            seen.insert(pkg_id);
+                    // Skip if this literal is satisfied (true)
+                    if state.decisions.satisfied(lit) {
+                        continue;
+                    }
 
-            if let Some(level) = state.decisions.decision_level(lit) {
-                if level == 0 {
-                    continue; // Skip level 0 decisions
-                }
+                    seen.insert(pkg_id);
 
-                if level == current_level {
-                    // Literal at current level
-                    // Check if this was a propagated literal (has a reason)
-                    if let Some(reason_rule_id) = state.decisions.decision_rule(lit) {
-                        if literals_at_current_level > 0 {
-                            // Resolve with the reason - add its literals
-                            if let Some(reason_rule) = state.rules.get(reason_rule_id) {
-                                for &reason_lit in reason_rule.literals() {
-                                    let reason_pkg = reason_lit.unsigned_abs() as PackageId;
-                                    if reason_pkg != pkg_id && !seen.contains(&reason_pkg) {
-                                        to_process.push(reason_lit);
-                                    }
-                                }
-                            }
+                    if let Some(level) = state.decisions.decision_level(lit) {
+                        if level == 0 {
                             continue;
                         }
+                        if level == 1 {
+                            num_at_level1 += 1;
+                        } else if level == current_level {
+                            num_at_current_level += 1;
+                        } else {
+                            // Not level 1 or current level - add to learned clause
+                            other_learned_literals.push(lit);
+                            backtrack_level = backtrack_level.max(level);
+                        }
                     }
-                    literals_at_current_level += 1;
-                    learned_literals.push(-lit);
-                } else {
-                    // Literal from earlier level - add to learned clause
-                    backtrack_level = backtrack_level.max(level);
-                    learned_literals.push(-lit);
                 }
             }
-        }
 
-        // If we couldn't find a proper UIP, use a simpler approach
-        if learned_literals.is_empty() {
-            // Fallback: just negate the last decision at current level
-            for &(lit, _) in state.decisions.queue().iter().rev() {
-                if state.decisions.decision_level(lit) == Some(current_level) {
-                    learned_literals.push(-lit);
+            // Done if no more literals at current level to resolve
+            if num_at_current_level == 0 {
+                break;
+            }
+
+            // Walk backwards through decisions to find the next one we've seen
+            loop {
+                if decision_idx == 0 {
+                    break;
+                }
+                decision_idx -= 1;
+
+                let (lit, _rule_id) = decisions[decision_idx];
+                let pkg_id = lit.unsigned_abs() as PackageId;
+
+                if seen.contains(&pkg_id) {
+                    seen.remove(&pkg_id);
+
+                    num_at_current_level -= 1;
+
+                    if num_at_current_level == 0 {
+                        // This is the UIP - the learned literal is its negation
+                        learned_literal = Some(-lit);
+
+                        // If only level 1 literals remain, we're done
+                        if num_at_level1 == 0 {
+                            break;
+                        }
+
+                        // Clear other literals (they're level 1)
+                        for other in &other_learned_literals {
+                            seen.remove(&(other.unsigned_abs() as PackageId));
+                        }
+                        num_at_level1 += 1;
+                    } else {
+                        // Get reason for this decision and continue resolving
+                        if let Some(reason_id) = state.decisions.decision_rule(lit) {
+                            current_rule = state.rules.get(reason_id);
+                        } else {
+                            current_rule = None;
+                        }
+                    }
                     break;
                 }
             }
-            backtrack_level = current_level.saturating_sub(1);
+
+            // If we found the UIP or no more decisions, stop
+            if learned_literal.is_some() || decision_idx == 0 {
+                break;
+            }
+        }
+
+        // If we couldn't find a UIP, use fallback
+        let learned_literal = match learned_literal {
+            Some(lit) => lit,
+            None => {
+                // Fallback: negate the last decision at current level
+                for &(lit, _) in decisions.iter().rev() {
+                    if state.decisions.decision_level(lit) == Some(current_level) {
+                        learned_literal = Some(-lit);
+                        break;
+                    }
+                }
+                learned_literal.unwrap_or(1)
+            }
+        };
+
+        // Build the learned rule: UIP first, then other literals
+        let mut learned_literals = vec![learned_literal];
+        for &lit in &other_learned_literals {
+            learned_literals.push(-lit);
         }
 
         // Ensure we backtrack at least one level
@@ -493,9 +658,6 @@ impl<'a> Solver<'a> {
         if backtrack_level == 0 && current_level > 1 {
             backtrack_level = 1;
         }
-
-        // The learned literal is the first one (the UIP, will become unit after backtracking)
-        let learned_literal = learned_literals.first().copied().unwrap_or(1);
 
         let learned_rule = Rule::learned(learned_literals);
 
@@ -522,83 +684,51 @@ impl<'a> Solver<'a> {
         problem
     }
 
-    /// Build a transaction from the solved decisions
-    fn build_transaction(&self, state: &SolverState, pool: &Pool, request: &Request) -> Transaction {
-        use super::pool::PoolEntry;
-
-        let mut transaction = Transaction::new();
-        let mut installed_base_packages = std::collections::HashSet::new();
+    fn build_result(&self, state: &SolverState, pool: &Pool, request: &Request) -> SolverResult {
+        let mut result = SolverResult::new();
+        let mut seen_packages = std::collections::HashSet::new();
 
         let installed_pkgs: Vec<_> = state.decisions.installed_packages().collect();
-        log::debug!("Building transaction from {} installed packages", installed_pkgs.len());
+        log::debug!("Building result from {} installed packages", installed_pkgs.len());
 
-        // Get all packages decided to be installed
         for pkg_id in installed_pkgs {
-            // Check if this is an alias package
             if let Some(entry) = pool.entry(pkg_id) {
                 match entry {
                     PoolEntry::Alias(alias) => {
-                        // Mark alias as installed
-                        transaction.mark_alias_installed(alias.clone());
+                        result.aliases.push(alias.clone());
                         continue;
                     }
-                    PoolEntry::Package(_) => {
-                        // Regular package - continue with normal processing
-                    }
+                    PoolEntry::Package(_) => {}
                 }
             }
 
             if let Some(package) = pool.package(pkg_id) {
-                installed_base_packages.insert(package.name.to_lowercase());
-
-                // Check if this is an update from a locked package
-                if let Some(locked) = request.get_locked(&package.name) {
-                    if locked.version != package.version {
-                        transaction.update(locked.clone(), package.clone());
-                        continue;
-                    }
-                    // Same version as locked - no change needed
-                    continue;
-                }
-
-                // Skip fixed packages (platform packages)
                 if request.is_fixed(&package.name) {
                     continue;
                 }
 
-                // New install
-                transaction.install(package.clone());
+                let key = (package.name.to_lowercase(), package.version.clone());
+                if seen_packages.contains(&key) {
+                    continue;
+                }
+                seen_packages.insert(key);
 
-                // Mark all aliases as installed when their base package is installed
-                // Composer marks all aliases (branch/root/inline) when the base is installed
+                result.packages.push(package.clone());
+
                 let aliases = pool.get_aliases(pkg_id);
                 for alias_id in aliases {
                     if let Some(entry) = pool.entry(alias_id) {
                         if let PoolEntry::Alias(alias) = entry {
-                            transaction.mark_alias_installed(alias.clone());
+                            result.aliases.push(alias.clone());
                         }
                     }
                 }
             }
         }
 
-        // Check for packages that need to be removed
-        for locked in &request.locked_packages {
-            let is_installed = state.decisions
-                .installed_packages()
-                .any(|id| {
-                    pool.package(id)
-                        .map(|p| p.name == locked.name)
-                        .unwrap_or(false)
-                });
+        result.packages.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-            if !is_installed {
-                transaction.uninstall(locked.clone());
-            }
-        }
-
-        transaction.sort();
-        transaction
+        result
     }
 }
 
@@ -677,12 +807,11 @@ mod tests {
         let result = solver.solve(&request);
         assert!(result.is_ok());
 
-        let transaction = result.unwrap();
-        assert!(!transaction.is_empty());
+        let solver_result = result.unwrap();
+        assert!(!solver_result.packages.is_empty());
 
         // Should install both A and B
-        let installed: Vec<_> = transaction.installs().collect();
-        assert_eq!(installed.len(), 2);
+        assert_eq!(solver_result.packages.len(), 2);
     }
 
     #[test]
@@ -751,12 +880,11 @@ mod tests {
         let result = solver.solve(&request);
         assert!(result.is_ok());
 
-        let transaction = result.unwrap();
-        let installed: Vec<_> = transaction.installs().collect();
-        assert_eq!(installed.len(), 1);
+        let solver_result = result.unwrap();
+        assert_eq!(solver_result.packages.len(), 1);
 
         // Should prefer the highest version (2.0.0)
-        assert_eq!(installed[0].version, "2.0.0");
+        assert_eq!(solver_result.packages[0].version, "2.0.0");
     }
 
     #[test]
@@ -775,10 +903,9 @@ mod tests {
         let result = solver.solve(&request);
         assert!(result.is_ok());
 
-        let transaction = result.unwrap();
-        let installed: Vec<_> = transaction.installs().collect();
+        let solver_result = result.unwrap();
 
         // Should prefer the lowest version (1.0.0)
-        assert_eq!(installed[0].version, "1.0.0");
+        assert_eq!(solver_result.packages[0].version, "1.0.0");
     }
 }

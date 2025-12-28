@@ -71,7 +71,7 @@ pub use request::Request;
 pub use rule::{Rule, RuleType, Literal};
 pub use rule_set::RuleSet;
 pub use decisions::Decisions;
-pub use solver::Solver;
+pub use solver::{Solver, SolverResult};
 pub use problem::Problem;
 pub use transaction::{Transaction, Operation};
 pub use policy::Policy;

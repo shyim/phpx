@@ -229,16 +229,13 @@ impl InstallationManager {
                 let binary_installer = self.binary_installer.clone();
                 async move {
                     if pkg.is_metapackage() {
-                        // Metapackages have no files
-                        return Ok::<_, crate::ComposerError>((pkg.clone(), Vec::new(), false));
+                        // Metapackages have no files to install
+                        return Ok::<_, crate::ComposerError>((pkg.clone(), Vec::new()));
                     }
 
-                    let download_result = library_installer.install(pkg).await?;
-                    if download_result.skipped {
-                        return Ok((pkg.clone(), Vec::new(), true));
-                    }
+                    library_installer.install(pkg).await?;
                     let bins = binary_installer.install(pkg).await?;
-                    Ok((pkg.clone(), bins, false))
+                    Ok((pkg.clone(), bins))
                 }
             })
             .buffer_unordered(MAX_CONCURRENT_INSTALLS)
@@ -246,11 +243,9 @@ impl InstallationManager {
             .await;
 
         for install_result in install_results {
-            let (pkg, bins, skipped) = install_result?;
-            if !skipped {
-                result.installed.push(pkg.as_ref().clone());
-                result.binaries.extend(bins);
-            }
+            let (pkg, bins) = install_result?;
+            result.installed.push(pkg.as_ref().clone());
+            result.binaries.extend(bins);
         }
 
         Ok(result)
@@ -293,10 +288,8 @@ impl InstallationManager {
             }
         }
 
-        // Handle metapackages (no files, quick)
         for package in metapackages {
             self.metapackage_installer.install(package).await?;
-            result.installed.push(package.clone());
         }
 
         // Install regular packages in parallel
@@ -305,9 +298,9 @@ impl InstallationManager {
                 let library_installer = self.library_installer.clone();
                 let binary_installer = self.binary_installer.clone();
                 async move {
-                    library_installer.install(package).await?;
+                    let download_result = library_installer.install(package).await?;
                     let bins = binary_installer.install(package).await?;
-                    Ok::<_, crate::ComposerError>(((*package).clone(), bins))
+                    Ok::<_, crate::ComposerError>(((*package).clone(), bins, download_result.skipped))
                 }
             })
             .buffer_unordered(MAX_CONCURRENT_INSTALLS)
@@ -315,8 +308,10 @@ impl InstallationManager {
             .await;
 
         for install_result in install_results {
-            let (pkg, bins) = install_result?;
-            result.installed.push(pkg);
+            let (pkg, bins, skipped) = install_result?;
+            if !skipped {
+                result.installed.push(pkg);
+            }
             result.binaries.extend(bins);
         }
 

@@ -94,14 +94,10 @@ impl Policy {
             }
         }
 
-        // Sort each group by version
         for group in by_name.values_mut() {
             group.sort_by(|&a, &b| {
                 self.compare_by_priority(pool, a, b, required_package, true)
             });
-
-            // Prune to best version within each group
-            *group = self.prune_to_best_version(pool, group);
         }
 
         // Flatten and sort across all groups
@@ -185,11 +181,41 @@ impl Policy {
 
                 // Compare stability if prefer_stable is set
                 if self.prefer_stable {
-                    let stability_a = pa.stability();
-                    let stability_b = pb.stability();
-                    let stability_cmp = stability_a.priority().cmp(&stability_b.priority());
+                    use crate::package::Stability;
+                    let stab_a = pa.stability();
+                    let stab_b = pb.stability();
+
+                    if self.prefer_lowest && self.prefer_dev_over_prerelease {
+                        let a_is_dev = stab_a == Stability::Dev;
+                        let b_is_dev = stab_b == Stability::Dev;
+                        let a_is_prerelease = matches!(stab_a, Stability::Alpha | Stability::Beta | Stability::RC);
+                        let b_is_prerelease = matches!(stab_b, Stability::Alpha | Stability::Beta | Stability::RC);
+
+                        if a_is_dev && b_is_prerelease {
+                            return std::cmp::Ordering::Less;
+                        }
+                        if b_is_dev && a_is_prerelease {
+                            return std::cmp::Ordering::Greater;
+                        }
+                    }
+
+                    let stability_cmp = stab_a.priority().cmp(&stab_b.priority());
                     if stability_cmp != std::cmp::Ordering::Equal {
                         return stability_cmp;
+                    }
+                }
+
+                if !self.preferred_versions.is_empty() {
+                    let pkg_name = pa.name.to_lowercase();
+                    if let Some(preferred) = self.preferred_versions.get(&pkg_name) {
+                        let a_is_preferred = self.versions_match(&pa.version, preferred);
+                        let b_is_preferred = self.versions_match(&pb.version, preferred);
+                        if a_is_preferred && !b_is_preferred {
+                            return std::cmp::Ordering::Less;
+                        }
+                        if !a_is_preferred && b_is_preferred {
+                            return std::cmp::Ordering::Greater;
+                        }
                     }
                 }
 
@@ -217,86 +243,6 @@ impl Policy {
     /// Check if source package replaces target package name.
     fn replaces(&self, source: &crate::package::Package, target_name: &str) -> bool {
         source.replace.keys().any(|replaced| replaced.eq_ignore_ascii_case(target_name))
-    }
-
-    /// Prune list to only include the best version(s).
-    /// Considers preferred versions first, then repository priority, then version comparison.
-    fn prune_to_best_version(&self, pool: &Pool, candidates: &[PackageId]) -> Vec<PackageId> {
-        if candidates.is_empty() {
-            return Vec::new();
-        }
-
-        // Check if there's a preferred version for this package
-        if !self.preferred_versions.is_empty() {
-            if let Some(first_pkg) = pool.package(candidates[0]) {
-                let pkg_name = first_pkg.name.to_lowercase();
-                if let Some(preferred_version) = self.preferred_versions.get(&pkg_name) {
-                    // Find all candidates matching the preferred version
-                    let preferred_matches: Vec<PackageId> = candidates
-                        .iter()
-                        .filter(|&&id| {
-                            if let Some(pkg) = pool.package(id) {
-                                self.versions_match(&pkg.version, preferred_version)
-                            } else {
-                                false
-                            }
-                        })
-                        .copied()
-                        .collect();
-
-                    // If we found matching preferred versions, return them
-                    if !preferred_matches.is_empty() {
-                        return preferred_matches;
-                    }
-                    // Otherwise, fall through to normal version selection
-                }
-            }
-        }
-
-        let mut best = vec![candidates[0]];
-        let mut best_pkg = pool.package(candidates[0]);
-        let mut best_priority = pool.get_priority_by_id(candidates[0]);
-
-        for &candidate in &candidates[1..] {
-            let pkg = pool.package(candidate);
-            let priority = pool.get_priority_by_id(candidate);
-
-            match (pkg, best_pkg) {
-                (Some(p), Some(bp)) => {
-                    // First compare repository priority
-                    if priority < best_priority {
-                        // This is from a higher priority repo
-                        best = vec![candidate];
-                        best_pkg = Some(p);
-                        best_priority = priority;
-                    } else if priority > best_priority {
-                        // Current best is from higher priority repo, skip
-                        continue;
-                    } else {
-                        // Same priority, compare versions
-                        let cmp = self.version_compare(p, bp);
-
-                        match cmp {
-                            std::cmp::Ordering::Less => {
-                                // This is better
-                                best = vec![candidate];
-                                best_pkg = Some(p);
-                            }
-                            std::cmp::Ordering::Equal => {
-                                // Same version, keep both
-                                best.push(candidate);
-                            }
-                            std::cmp::Ordering::Greater => {
-                                // Current best is better, skip
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        best
     }
 
     /// Check if two version strings match (normalized comparison).
@@ -369,6 +315,58 @@ impl Policy {
     pub fn select_best(&self, pool: &Pool, candidates: &[PackageId]) -> Option<PackageId> {
         self.select_preferred(pool, candidates).into_iter().next()
     }
+
+    /// Select the best package(s) from candidates for pool optimization.
+    /// Unlike select_preferred which returns all candidates sorted,
+    /// this returns only the best version(s) for pruning the pool.
+    pub fn select_preferred_for_optimization(&self, pool: &Pool, candidates: &[PackageId]) -> Vec<PackageId> {
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // Group candidates by package name
+        let mut by_name: BTreeMap<String, Vec<PackageId>> = BTreeMap::new();
+        for &id in candidates {
+            if let Some(pkg) = pool.package(id) {
+                by_name.entry(pkg.name.to_lowercase()).or_default().push(id);
+            }
+        }
+
+        // For each group, sort and keep only the best version
+        let mut result = Vec::new();
+        for (_, group) in by_name.iter_mut() {
+            group.sort_by(|&a, &b| {
+                self.compare_by_priority(pool, a, b, None, true)
+            });
+
+            // Keep only the best version(s) from this group
+            if !group.is_empty() {
+                // Get best package info
+                let best_pkg = pool.package(group[0]);
+                let best_priority = pool.get_priority_by_id(group[0]);
+                result.push(group[0]);
+
+                // Also include packages with same version and priority
+                for &id in &group[1..] {
+                    let pkg = pool.package(id);
+                    let priority = pool.get_priority_by_id(id);
+
+                    if priority == best_priority {
+                        match (pkg, best_pkg) {
+                            (Some(p), Some(bp)) if self.version_compare(p, bp) == std::cmp::Ordering::Equal => {
+                                result.push(id);
+                            }
+                            _ => break,
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        result
+    }
 }
 
 /// Simple version comparison.
@@ -418,45 +416,49 @@ mod tests {
     #[test]
     fn test_policy_prefer_highest() {
         let mut pool = Pool::new();
-        let _id1 = pool.add_package(Package::new("vendor/pkg", "1.0.0"));
+        let id1 = pool.add_package(Package::new("vendor/pkg", "1.0.0"));
         let id2 = pool.add_package(Package::new("vendor/pkg", "2.0.0"));
-        let _id3 = pool.add_package(Package::new("vendor/pkg", "1.5.0"));
+        let id3 = pool.add_package(Package::new("vendor/pkg", "1.5.0"));
 
         let policy = Policy::new();
         let sorted = policy.select_preferred(&pool, &[1, 2, 3]);
 
-        // Policy now prunes to best version, so only 2.0.0 is returned
-        assert_eq!(sorted.len(), 1);
-        assert_eq!(sorted[0], id2); // 2.0.0 is best (highest)
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0], id2);
+        assert_eq!(sorted[1], id3);
+        assert_eq!(sorted[2], id1);
     }
 
     #[test]
     fn test_policy_prefer_lowest() {
         let mut pool = Pool::new();
         let id1 = pool.add_package(Package::new("vendor/pkg", "1.0.0"));
-        let _id2 = pool.add_package(Package::new("vendor/pkg", "2.0.0"));
-        let _id3 = pool.add_package(Package::new("vendor/pkg", "1.5.0"));
+        let id2 = pool.add_package(Package::new("vendor/pkg", "2.0.0"));
+        let id3 = pool.add_package(Package::new("vendor/pkg", "1.5.0"));
 
         let policy = Policy::new().prefer_lowest(true);
         let sorted = policy.select_preferred(&pool, &[1, 2, 3]);
 
-        // Policy now prunes to best version, so only 1.0.0 is returned
-        assert_eq!(sorted.len(), 1);
-        assert_eq!(sorted[0], id1); // 1.0.0 is best (lowest)
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0], id1);
+        assert_eq!(sorted[1], id3);
+        assert_eq!(sorted[2], id2);
     }
 
     #[test]
     fn test_policy_prefer_stable() {
-        let mut pool = Pool::new();
-        let _id1 = pool.add_package(Package::new("vendor/pkg", "2.0.0-dev"));
+        use crate::package::Stability;
+
+        let mut pool = Pool::with_minimum_stability(Stability::Dev);
+        let id1 = pool.add_package(Package::new("vendor/pkg", "2.0.0-dev"));
         let id2 = pool.add_package(Package::new("vendor/pkg", "1.0.0"));
 
         let policy = Policy::new().prefer_stable(true);
         let sorted = policy.select_preferred(&pool, &[1, 2]);
 
-        // Stable (1.0.0) should be preferred even though 2.0.0 > 1.0.0
-        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted.len(), 2);
         assert_eq!(sorted[0], id2);
+        assert_eq!(sorted[1], id1);
     }
 
     #[test]
@@ -510,14 +512,16 @@ mod tests {
     #[test]
     fn test_select_newest() {
         let mut pool = Pool::new();
-        let _id_a1 = pool.add_package(Package::new("a", "1.0.0"));
+        let id_a1 = pool.add_package(Package::new("a", "1.0.0"));
         let id_a2 = pool.add_package(Package::new("a", "2.0.0"));
 
         let policy = Policy::new();
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
-        // Should select newest (2.0.0)
-        assert_eq!(selected, vec![id_a2]);
+        // Should have newest (2.0.0) first
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_a2);
+        assert_eq!(selected[1], id_a1);
     }
 
     /// Port of Composer's testSelectNewestPicksLatest
@@ -527,14 +531,16 @@ mod tests {
         use crate::package::Stability;
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
-        let _id_a1 = pool.add_package(Package::new("a", "1.0.0"));
+        let id_a1 = pool.add_package(Package::new("a", "1.0.0"));
         let id_a2 = pool.add_package(Package::new("a", "1.0.1-alpha"));
 
-        // With prefer_stable=false, should pick the alpha (newer version)
+        // With prefer_stable=false, should pick the alpha (newer version) first
         let policy = Policy::new().prefer_stable(false);
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
-        assert_eq!(selected, vec![id_a2]);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_a2);
+        assert_eq!(selected[1], id_a1);
     }
 
     /// Port of Composer's testSelectNewestPicksLatestStableWithPreferStable
@@ -544,13 +550,15 @@ mod tests {
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
         let id_a1 = pool.add_package(Package::new("a", "1.0.0"));
-        let _id_a2 = pool.add_package(Package::new("a", "1.0.1-alpha"));
+        let id_a2 = pool.add_package(Package::new("a", "1.0.1-alpha"));
 
-        // With prefer_stable=true (default), should pick stable 1.0.0
+        // With prefer_stable=true (default), should have stable 1.0.0 first
         let policy = Policy::new().prefer_stable(true);
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
-        assert_eq!(selected, vec![id_a1]);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_a1);
+        assert_eq!(selected[1], id_a2);
     }
 
     /// Port of Composer's testSelectNewestWithDevPicksNonDev
@@ -559,14 +567,16 @@ mod tests {
         use crate::package::Stability;
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
-        let _id_a1 = pool.add_package(Package::new("a", "dev-foo"));
+        let id_a1 = pool.add_package(Package::new("a", "dev-foo"));
         let id_a2 = pool.add_package(Package::new("a", "1.0.0"));
 
         let policy = Policy::new();
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
-        // Should pick stable 1.0.0 over dev-foo
-        assert_eq!(selected, vec![id_a2]);
+        // Should have stable 1.0.0 first
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_a2);
+        assert_eq!(selected[1], id_a1);
     }
 
     /// Port of Composer's testSelectLowest
@@ -574,13 +584,15 @@ mod tests {
     fn test_select_lowest() {
         let mut pool = Pool::new();
         let id_a1 = pool.add_package(Package::new("a", "1.0.0"));
-        let _id_a2 = pool.add_package(Package::new("a", "2.0.0"));
+        let id_a2 = pool.add_package(Package::new("a", "2.0.0"));
 
         let policy = Policy::new().prefer_lowest(true);
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
-        // Should select lowest (1.0.0)
-        assert_eq!(selected, vec![id_a1]);
+        // Should have lowest (1.0.0) first
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_a1);
+        assert_eq!(selected[1], id_a2);
     }
 
     /// Port of Composer's testSelectLowestPrefersPrereleaseOverDev
@@ -590,15 +602,17 @@ mod tests {
         use crate::package::Stability;
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
-        let _id_dev = pool.add_package(Package::new("a", "dev-master"));
+        let id_dev = pool.add_package(Package::new("a", "dev-master"));
         let id_prerelease = pool.add_package(Package::new("a", "1.0.0-alpha1"));
 
         // prefer_stable=true, prefer_lowest=true
         let policy = Policy::new().prefer_stable(true).prefer_lowest(true);
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
-        // Alpha is more stable than dev, so it should be preferred
-        assert_eq!(selected, vec![id_prerelease]);
+        // Alpha is more stable than dev, so it should be first
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_prerelease);
+        assert_eq!(selected[1], id_dev);
     }
 
     /// Port of Composer's testSelectLowestWithPreferStableStillPrefersStable
@@ -608,14 +622,16 @@ mod tests {
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
         let id_stable = pool.add_package(Package::new("a", "1.0.0"));
-        let _id_dev = pool.add_package(Package::new("a", "dev-master"));
+        let id_dev = pool.add_package(Package::new("a", "dev-master"));
 
         // prefer_stable=true, prefer_lowest=true
         let policy = Policy::new().prefer_stable(true).prefer_lowest(true);
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
         // Stable is preferred even with prefer_lowest
-        assert_eq!(selected, vec![id_stable]);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_stable);
+        assert_eq!(selected[1], id_dev);
     }
 
     /// Port of Composer's testRepositoryOrderingAffectsPriority
@@ -624,11 +640,11 @@ mod tests {
         let mut pool = Pool::new();
 
         // Repo1 packages (added first = higher priority)
-        let _id1 = pool.add_package_from_repo(Package::new("a", "1.0.0"), Some("repo1"));
+        let id1 = pool.add_package_from_repo(Package::new("a", "1.0.0"), Some("repo1"));
         let id2 = pool.add_package_from_repo(Package::new("a", "1.1.0"), Some("repo1"));
         // Repo2 packages (added second = lower priority)
-        let _id3 = pool.add_package_from_repo(Package::new("a", "1.1.0"), Some("repo2"));
-        let _id4 = pool.add_package_from_repo(Package::new("a", "1.2.0"), Some("repo2"));
+        let id3 = pool.add_package_from_repo(Package::new("a", "1.1.0"), Some("repo2"));
+        let id4 = pool.add_package_from_repo(Package::new("a", "1.2.0"), Some("repo2"));
 
         pool.set_priority("repo1", 0); // higher priority
         pool.set_priority("repo2", 1); // lower priority
@@ -636,8 +652,13 @@ mod tests {
         let policy = Policy::new();
         let selected = policy.select_preferred(&pool, &[1, 2, 3, 4]);
 
-        // Should prefer 1.1.0 from repo1 (higher priority repo, highest version in that repo)
-        assert_eq!(selected, vec![id2]);
+        // Should have 1.1.0 from repo1 (higher priority repo, highest version in that repo) first
+        assert_eq!(selected.len(), 4);
+        assert_eq!(selected[0], id2); // 1.1.0 from repo1 (best)
+        assert_eq!(selected[1], id1); // 1.0.0 from repo1
+        // repo2 packages come after since lower priority
+        assert!(selected.contains(&id3));
+        assert!(selected.contains(&id4));
     }
 
     /// Port of Composer's testSelectAllProviders
@@ -714,7 +735,7 @@ mod tests {
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
         let id_dev = pool.add_package(Package::new("a", "dev-master"));
-        let _id_prerelease = pool.add_package(Package::new("a", "1.0.0-alpha1"));
+        let id_prerelease = pool.add_package(Package::new("a", "1.0.0-alpha1"));
 
         // prefer_stable=true, prefer_lowest=true, prefer_dev_over_prerelease=true
         let policy = Policy::new()
@@ -724,7 +745,9 @@ mod tests {
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
         // With prefer_dev_over_prerelease, dev is preferred over alpha
-        assert_eq!(selected, vec![id_dev]);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_dev);
+        assert_eq!(selected[1], id_prerelease);
     }
 
     #[test]
@@ -733,7 +756,7 @@ mod tests {
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
         let id_dev = pool.add_package(Package::new("a", "dev-master"));
-        let _id_prerelease = pool.add_package(Package::new("a", "1.0.0-beta1"));
+        let id_prerelease = pool.add_package(Package::new("a", "1.0.0-beta1"));
 
         let policy = Policy::new()
             .prefer_stable(true)
@@ -742,7 +765,9 @@ mod tests {
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
         // With prefer_dev_over_prerelease, dev is preferred over beta
-        assert_eq!(selected, vec![id_dev]);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_dev);
+        assert_eq!(selected[1], id_prerelease);
     }
 
     #[test]
@@ -751,7 +776,7 @@ mod tests {
 
         let mut pool = Pool::with_minimum_stability(Stability::Dev);
         let id_dev = pool.add_package(Package::new("a", "dev-master"));
-        let _id_prerelease = pool.add_package(Package::new("a", "1.0.0-RC1"));
+        let id_prerelease = pool.add_package(Package::new("a", "1.0.0-RC1"));
 
         let policy = Policy::new()
             .prefer_stable(true)
@@ -760,17 +785,19 @@ mod tests {
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
         // With prefer_dev_over_prerelease, dev is preferred over RC
-        assert_eq!(selected, vec![id_dev]);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_dev);
+        assert_eq!(selected[1], id_prerelease);
     }
 
     /// Port of Composer's testSelectNewestWithPreferredVersionPicksPreferredVersionIfAvailable
     #[test]
     fn test_select_newest_with_preferred_version_picks_preferred_if_available() {
         let mut pool = Pool::new();
-        let _id_a1 = pool.add_package(Package::new("a", "1.0.0"));
+        let id_a1 = pool.add_package(Package::new("a", "1.0.0"));
         let id_a2 = pool.add_package(Package::new("a", "1.1.0"));
         let id_a2b = pool.add_package(Package::new("a", "1.1.0")); // duplicate version
-        let _id_a3 = pool.add_package(Package::new("a", "1.2.0"));
+        let id_a3 = pool.add_package(Package::new("a", "1.2.0"));
 
         // Preferred version is 1.1.0.0 (normalized format)
         let policy = Policy::new()
@@ -779,17 +806,21 @@ mod tests {
             .with_preferred_version("a", "1.1.0.0");
         let selected = policy.select_preferred(&pool, &[1, 2, 3, 4]);
 
-        // Should select both 1.1.0 packages
-        assert_eq!(selected.len(), 2);
-        assert!(selected.contains(&id_a2));
-        assert!(selected.contains(&id_a2b));
+        // Should have 1.1.0 packages first (preferred), then others
+        assert_eq!(selected.len(), 4);
+        // First two should be the 1.1.0 versions
+        assert!(selected[..2].contains(&id_a2));
+        assert!(selected[..2].contains(&id_a2b));
+        // Then 1.2.0 and 1.0.0
+        assert!(selected.contains(&id_a1));
+        assert!(selected.contains(&id_a3));
     }
 
     /// Port of Composer's testSelectNewestWithPreferredVersionPicksNewestOtherwise
     #[test]
     fn test_select_newest_with_preferred_version_picks_newest_otherwise() {
         let mut pool = Pool::new();
-        let _id_a1 = pool.add_package(Package::new("a", "1.0.0"));
+        let id_a1 = pool.add_package(Package::new("a", "1.0.0"));
         let id_a2 = pool.add_package(Package::new("a", "1.2.0"));
 
         // Preferred version is 1.1.0.0 which doesn't exist
@@ -799,8 +830,10 @@ mod tests {
             .with_preferred_version("a", "1.1.0.0");
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
-        // Should fall back to newest (1.2.0)
-        assert_eq!(selected, vec![id_a2]);
+        // Should fall back to version ordering (newest first)
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_a2);
+        assert_eq!(selected[1], id_a1);
     }
 
     /// Port of Composer's testSelectNewestWithPreferredVersionPicksLowestIfPreferLowest
@@ -808,7 +841,7 @@ mod tests {
     fn test_select_newest_with_preferred_version_picks_lowest_if_prefer_lowest() {
         let mut pool = Pool::new();
         let id_a1 = pool.add_package(Package::new("a", "1.0.0"));
-        let _id_a2 = pool.add_package(Package::new("a", "1.2.0"));
+        let id_a2 = pool.add_package(Package::new("a", "1.2.0"));
 
         // Preferred version is 1.1.0.0 which doesn't exist
         let policy = Policy::new()
@@ -818,7 +851,9 @@ mod tests {
         let selected = policy.select_preferred(&pool, &[1, 2]);
 
         // Should fall back to lowest (1.0.0) since prefer_lowest is true
-        assert_eq!(selected, vec![id_a1]);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0], id_a1);
+        assert_eq!(selected[1], id_a2);
     }
 
     /// Port of Composer's testSelectLocalReposFirst

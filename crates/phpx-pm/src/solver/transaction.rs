@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::package::{AliasPackage, Package};
 
-/// A transaction represents the changes needed to reach the resolved state.
 #[derive(Debug, Clone, Default)]
 pub struct Transaction {
     /// Operations to perform
@@ -37,6 +36,166 @@ impl Transaction {
         Self {
             operations: Vec::new(),
         }
+    }
+
+    pub fn from_packages(
+        present_packages: Vec<Arc<Package>>,
+        result_packages: Vec<Arc<Package>>,
+        result_aliases: Vec<Arc<AliasPackage>>,
+    ) -> Self {
+        let mut tx = Self::new();
+        tx.calculate_operations(present_packages, result_packages, result_aliases);
+        tx
+    }
+
+    fn calculate_operations(
+        &mut self,
+        present_packages: Vec<Arc<Package>>,
+        result_packages: Vec<Arc<Package>>,
+        result_aliases: Vec<Arc<AliasPackage>>,
+    ) {
+        let mut present_package_map: HashMap<String, Arc<Package>> = HashMap::new();
+        let mut remove_map: HashMap<String, Arc<Package>> = HashMap::new();
+
+        let present_alias_map: HashMap<String, Arc<AliasPackage>> = HashMap::new();
+        let mut remove_alias_map: HashMap<String, Arc<AliasPackage>> = HashMap::new();
+
+        for package in &present_packages {
+            let name_lower = package.name.to_lowercase();
+            present_package_map.insert(name_lower.clone(), package.clone());
+            remove_map.insert(name_lower, package.clone());
+        }
+
+        for package in &result_packages {
+            let name_lower = package.name.to_lowercase();
+
+            if let Some(present_pkg) = present_package_map.get(&name_lower) {
+                if self.needs_update(present_pkg, package) {
+                    self.operations.push(Operation::Update {
+                        from: present_pkg.clone(),
+                        to: package.clone(),
+                    });
+                }
+                remove_map.remove(&name_lower);
+            } else {
+                self.operations.push(Operation::Install(package.clone()));
+                remove_map.remove(&name_lower);
+            }
+        }
+
+        for alias in &result_aliases {
+            let alias_key = format!("{}::{}", alias.name().to_lowercase(), alias.version());
+            if present_alias_map.contains_key(&alias_key) {
+                remove_alias_map.remove(&alias_key);
+            } else {
+                self.operations.push(Operation::MarkAliasInstalled(alias.clone()));
+            }
+        }
+
+        let mut remove_list: Vec<_> = remove_map.into_iter().collect();
+        remove_list.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, package) in remove_list {
+            self.operations.insert(0, Operation::Uninstall(package));
+        }
+
+        let mut remove_alias_list: Vec<_> = remove_alias_map.into_iter().collect();
+        remove_alias_list.sort_by(|a, b| a.0.cmp(&b.0));
+        for (_, alias) in remove_alias_list {
+            self.operations.push(Operation::MarkAliasUninstalled(alias));
+        }
+
+        self.move_plugins_to_front();
+        self.move_uninstalls_to_front();
+    }
+
+    fn needs_update(&self, present: &Package, target: &Package) -> bool {
+        if present.version != target.version {
+            return true;
+        }
+
+        let present_dist_ref = present.dist.as_ref().and_then(|d| d.reference.as_ref());
+        let target_dist_ref = target.dist.as_ref().and_then(|d| d.reference.as_ref());
+        if present_dist_ref.is_some() && target_dist_ref.is_some() && present_dist_ref != target_dist_ref {
+            return true;
+        }
+
+        let present_source_ref = present.source.as_ref().map(|s| &s.reference);
+        let target_source_ref = target.source.as_ref().map(|s| &s.reference);
+        if present_source_ref.is_some() && target_source_ref.is_some() && present_source_ref != target_source_ref {
+            return true;
+        }
+
+        false
+    }
+
+    /// Move plugin installations to the front (after uninstalls).
+    /// Plugins need to be installed before packages that depend on them.
+    fn move_plugins_to_front(&mut self) {
+        let mut plugins_no_deps = Vec::new();
+        let mut plugins_with_deps = Vec::new();
+        let mut plugin_requires: HashSet<String> = HashSet::new();
+        let mut other_ops = Vec::new();
+
+        // Process in reverse to handle dependencies correctly
+        for op in self.operations.drain(..).rev() {
+            let package = match &op {
+                Operation::Install(pkg) => Some(pkg.clone()),
+                Operation::Update { to, .. } => Some(to.clone()),
+                _ => None,
+            };
+
+            if let Some(pkg) = package {
+                let is_plugin = pkg.package_type == "composer-plugin"
+                    || pkg.package_type == "composer-installer";
+
+                // Check if this is a plugin or dependency of a plugin
+                let names: HashSet<_> = pkg.get_names(true).into_iter().collect();
+                let is_plugin_dep = !names.is_disjoint(&plugin_requires);
+
+                if is_plugin || is_plugin_dep {
+                    // Get non-platform requires
+                    let requires: Vec<_> = pkg.require.keys()
+                        .filter(|r| {
+                            let r_lower = r.to_lowercase();
+                            !r_lower.starts_with("php") && !r_lower.starts_with("ext-") && !r_lower.starts_with("lib-")
+                        })
+                        .map(|s| s.to_lowercase())
+                        .collect();
+
+                    if is_plugin && requires.is_empty() {
+                        plugins_no_deps.insert(0, op);
+                    } else {
+                        plugin_requires.extend(requires);
+                        plugins_with_deps.insert(0, op);
+                    }
+                    continue;
+                }
+            }
+            other_ops.insert(0, op);
+        }
+
+        // Reconstruct: plugins_no_deps, plugins_with_deps, other_ops
+        self.operations.extend(plugins_no_deps);
+        self.operations.extend(plugins_with_deps);
+        self.operations.extend(other_ops);
+    }
+
+    /// Move uninstall operations to the front.
+    fn move_uninstalls_to_front(&mut self) {
+        let mut uninstalls = Vec::new();
+        let mut others = Vec::new();
+
+        for op in self.operations.drain(..) {
+            match &op {
+                Operation::Uninstall(_) | Operation::MarkAliasUninstalled(_) => {
+                    uninstalls.push(op);
+                }
+                _ => others.push(op),
+            }
+        }
+
+        self.operations.extend(uninstalls);
+        self.operations.extend(others);
     }
 
     /// Add an install operation
@@ -402,5 +561,61 @@ mod tests {
         let first_install = tx.operations.iter().position(|op| matches!(op, Operation::Install(_)));
 
         assert!(first_uninstall.unwrap() < first_install.unwrap(), "Uninstalls should come before installs");
+    }
+
+    #[test]
+    fn test_transaction_from_packages_new_install() {
+        // No present packages, one result package -> should generate Install operation
+        let present = vec![];
+        let result = vec![Arc::new(Package::new("vendor/a", "1.0.0"))];
+        let aliases = vec![];
+
+        let tx = Transaction::from_packages(present, result, aliases);
+
+        assert_eq!(tx.new_installs().count(), 1);
+        assert_eq!(tx.updates().count(), 0);
+        assert_eq!(tx.removals().count(), 0);
+    }
+
+    #[test]
+    fn test_transaction_from_packages_update() {
+        // Present has v1.0.0, result has v2.0.0 -> should generate Update operation
+        let present = vec![Arc::new(Package::new("vendor/a", "1.0.0"))];
+        let result = vec![Arc::new(Package::new("vendor/a", "2.0.0"))];
+        let aliases = vec![];
+
+        let tx = Transaction::from_packages(present, result, aliases);
+
+        assert_eq!(tx.new_installs().count(), 0);
+        assert_eq!(tx.updates().count(), 1);
+        assert_eq!(tx.removals().count(), 0);
+    }
+
+    #[test]
+    fn test_transaction_from_packages_no_change() {
+        // Same package version -> should generate no operations
+        let present = vec![Arc::new(Package::new("vendor/a", "1.0.0"))];
+        let result = vec![Arc::new(Package::new("vendor/a", "1.0.0"))];
+        let aliases = vec![];
+
+        let tx = Transaction::from_packages(present, result, aliases);
+
+        assert_eq!(tx.new_installs().count(), 0);
+        assert_eq!(tx.updates().count(), 0);
+        assert_eq!(tx.removals().count(), 0);
+    }
+
+    #[test]
+    fn test_transaction_from_packages_uninstall() {
+        // Present has a package, result doesn't -> should generate Uninstall operation
+        let present = vec![Arc::new(Package::new("vendor/a", "1.0.0"))];
+        let result = vec![];
+        let aliases = vec![];
+
+        let tx = Transaction::from_packages(present, result, aliases);
+
+        assert_eq!(tx.new_installs().count(), 0);
+        assert_eq!(tx.updates().count(), 0);
+        assert_eq!(tx.removals().count(), 1);
     }
 }

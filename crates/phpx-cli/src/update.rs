@@ -9,7 +9,7 @@ use phpx_pm::{
     ComposerBuilder,
     config::Config,
     installer::Installer,
-    json::ComposerJson,
+    json::{ComposerJson, ComposerLock},
 };
 
 use crate::pm::platform::PlatformInfo;
@@ -134,6 +134,18 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
     let composer_json: ComposerJson = serde_json::from_str(&json_content)
         .context("Failed to parse composer.json")?;
 
+    // Load composer.lock if it exists (to determine what's already installed)
+    let lock_path = working_dir.join("composer.lock");
+    let lock = if lock_path.exists() {
+        let lock_content = std::fs::read_to_string(&lock_path)
+            .context("Failed to read composer.lock")?;
+        let lock: ComposerLock = serde_json::from_str(&lock_content)
+            .context("Failed to parse composer.lock")?;
+        Some(lock)
+    } else {
+        None
+    };
+
     // Load config
     let config = Config::build(Some(&working_dir), true)?;
 
@@ -144,6 +156,7 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
     let mut builder = ComposerBuilder::new(working_dir.clone())
         .with_config(config)
         .with_composer_json(composer_json)
+        .with_composer_lock(lock)
         .with_platform_packages(platform.to_packages())
         .dry_run(args.dry_run)
         .no_dev(args.no_dev)
@@ -161,8 +174,15 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
     // Run Installer
     let installer = Installer::new(composer);
 
+    let update_packages = if args.packages.is_empty() {
+        None
+    } else {
+        Some(args.packages.clone())
+    };
+
     installer.update(
         args.optimize_autoloader,
-        args.lock
+        args.lock,
+        update_packages,
     ).await
 }

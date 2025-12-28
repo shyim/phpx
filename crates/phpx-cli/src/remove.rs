@@ -135,7 +135,8 @@ pub async fn execute(args: RemoveArgs) -> Result<i32> {
 
         installer.update(
             args.optimize_autoloader,
-            false, // update_lock_only
+            false,
+            None,
         ).await
     } else {
         println!("{} {} packages removed from composer.json",
