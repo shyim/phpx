@@ -208,10 +208,6 @@ pub struct LockedPackage {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_indexmap_or_empty_array")]
     pub require: IndexMap<String, String>,
 
-    /// Development requirements
-    #[serde(default, rename = "require-dev", skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_indexmap_or_empty_array")]
-    pub require_dev: IndexMap<String, String>,
-
     /// Conflicts
     #[serde(default, skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_indexmap_or_empty_array")]
     pub conflict: IndexMap<String, String>,
@@ -223,6 +219,10 @@ pub struct LockedPackage {
     /// Replaced packages
     #[serde(default, skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_indexmap_or_empty_array")]
     pub replace: IndexMap<String, String>,
+
+    /// Development requirements
+    #[serde(default, rename = "require-dev", skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_indexmap_or_empty_array")]
+    pub require_dev: IndexMap<String, String>,
 
     /// Suggested packages
     #[serde(default, skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_indexmap_or_empty_array")]
@@ -261,7 +261,7 @@ pub struct LockedPackage {
     pub authors: Vec<LockAuthor>,
 
     /// Package description
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "is_none_or_empty")]
     pub description: Option<String>,
 
     /// Homepage URL
@@ -273,8 +273,8 @@ pub struct LockedPackage {
     pub keywords: Vec<String>,
 
     /// Support information
-    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "deserialize_map_or_empty_array")]
-    pub support: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_indexmap_or_empty_array")]
+    pub support: IndexMap<String, String>,
 
     /// Funding information
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

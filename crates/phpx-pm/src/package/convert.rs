@@ -1,11 +1,19 @@
 //! Conversions between Package and LockedPackage types.
 
 use phpx_semver::VersionParser;
+use indexmap::IndexMap;
 
 use super::{Autoload, AutoloadPath, Author, Dist, Funding, Package, Source, Support};
 use crate::json::{
     LockAutoload, LockAuthor, LockDist, LockFunding, LockSource, LockedPackage,
 };
+
+/// Sort dependencies alphabetically by key (like PHP's ksort)
+fn sort_dependencies(deps: &IndexMap<String, String>) -> IndexMap<String, String> {
+    let mut entries: Vec<_> = deps.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
 
 impl From<&LockedPackage> for Package {
     fn from(lp: &LockedPackage) -> Self {
@@ -96,12 +104,12 @@ impl From<&Package> for LockedPackage {
             version: pkg.pretty_version().to_string(),
             source: pkg.source.as_ref().map(LockSource::from),
             dist: pkg.dist.as_ref().map(LockDist::from),
-            require: pkg.require.clone(),
-            require_dev: pkg.require_dev.clone(),
-            conflict: pkg.conflict.clone(),
-            provide: pkg.provide.clone(),
-            replace: pkg.replace.clone(),
-            suggest: pkg.suggest.clone(),
+            require: sort_dependencies(&pkg.require),
+            require_dev: sort_dependencies(&pkg.require_dev),
+            conflict: sort_dependencies(&pkg.conflict),
+            provide: sort_dependencies(&pkg.provide),
+            replace: sort_dependencies(&pkg.replace),
+            suggest: sort_dependencies(&pkg.suggest),
             bin: pkg.bin.clone(),
             package_type: pkg.package_type.clone(),
             extra: pkg.extra.clone(),
@@ -110,7 +118,11 @@ impl From<&Package> for LockedPackage {
             notification_url: pkg.notification_url.clone(),
             description: pkg.description.clone(),
             homepage: pkg.homepage.clone(),
-            keywords: pkg.keywords.clone(),
+            keywords: {
+                let mut kw = pkg.keywords.clone();
+                kw.sort();
+                kw
+            },
             license: pkg.license.clone(),
             time: pkg.time.map(|t| t.to_rfc3339()),
             installation_source: pkg.installation_source.clone(),
@@ -223,8 +235,8 @@ impl From<&Author> for LockAuthor {
     }
 }
 
-impl From<&std::collections::HashMap<String, String>> for Support {
-    fn from(map: &std::collections::HashMap<String, String>) -> Self {
+impl From<&IndexMap<String, String>> for Support {
+    fn from(map: &IndexMap<String, String>) -> Self {
         Support {
             issues: map.get("issues").cloned(),
             forum: map.get("forum").cloned(),
@@ -240,18 +252,19 @@ impl From<&std::collections::HashMap<String, String>> for Support {
     }
 }
 
-fn support_to_hashmap(s: &Support) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    if let Some(ref v) = s.issues { map.insert("issues".to_string(), v.clone()); }
-    if let Some(ref v) = s.forum { map.insert("forum".to_string(), v.clone()); }
-    if let Some(ref v) = s.wiki { map.insert("wiki".to_string(), v.clone()); }
-    if let Some(ref v) = s.source { map.insert("source".to_string(), v.clone()); }
-    if let Some(ref v) = s.email { map.insert("email".to_string(), v.clone()); }
-    if let Some(ref v) = s.irc { map.insert("irc".to_string(), v.clone()); }
-    if let Some(ref v) = s.docs { map.insert("docs".to_string(), v.clone()); }
-    if let Some(ref v) = s.rss { map.insert("rss".to_string(), v.clone()); }
+fn support_to_hashmap(s: &Support) -> IndexMap<String, String> {
+    let mut map = IndexMap::new();
+    // Maintain alphabetical order like Composer does
     if let Some(ref v) = s.chat { map.insert("chat".to_string(), v.clone()); }
+    if let Some(ref v) = s.docs { map.insert("docs".to_string(), v.clone()); }
+    if let Some(ref v) = s.email { map.insert("email".to_string(), v.clone()); }
+    if let Some(ref v) = s.forum { map.insert("forum".to_string(), v.clone()); }
+    if let Some(ref v) = s.irc { map.insert("irc".to_string(), v.clone()); }
+    if let Some(ref v) = s.issues { map.insert("issues".to_string(), v.clone()); }
+    if let Some(ref v) = s.rss { map.insert("rss".to_string(), v.clone()); }
     if let Some(ref v) = s.security { map.insert("security".to_string(), v.clone()); }
+    if let Some(ref v) = s.source { map.insert("source".to_string(), v.clone()); }
+    if let Some(ref v) = s.wiki { map.insert("wiki".to_string(), v.clone()); }
     map
 }
 

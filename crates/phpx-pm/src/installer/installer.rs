@@ -406,7 +406,11 @@ impl Installer {
         // Only write lock file if there were changes
         if lock_file_changed && !dry_run {
             log::debug!("Writing lock file");
-            let lock_content = serde_json::to_string_pretty(&lock).context("Failed to serialize composer.lock")?;
+            let mut lock_content = serde_json::to_string_pretty(&lock).context("Failed to serialize composer.lock")?;
+            // Composer doesn't add a trailing newline
+            if lock_content.ends_with('\n') {
+                lock_content.pop();
+            }
             std::fs::write(working_dir.join("composer.lock"), lock_content).context("Failed to write composer.lock")?;
         }
 
