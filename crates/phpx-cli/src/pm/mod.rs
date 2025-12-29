@@ -22,6 +22,12 @@ pub use why::WhyArgs;
 pub use show::ShowArgs;
 pub use search::SearchArgs;
 
+// Re-export args for pm subcommand aliases
+pub use crate::install::InstallArgs;
+pub use crate::update::UpdateArgs;
+pub use crate::add::AddArgs;
+pub use crate::remove::RemoveArgs;
+
 /// Package manager subcommands
 #[derive(Subcommand, Debug)]
 pub enum PmCommands {
@@ -50,6 +56,21 @@ pub enum PmCommands {
 
     /// Search for packages
     Search(SearchArgs),
+
+    /// Install project dependencies from composer.lock (alias for top-level install)
+    #[command(alias = "i")]
+    Install(InstallArgs),
+
+    /// Update dependencies to their latest versions (alias for top-level update)
+    Update(UpdateArgs),
+
+    /// Add a package to the project (alias for top-level add)
+    #[command(alias = "require")]
+    Add(AddArgs),
+
+    /// Remove a package from the project (alias for top-level remove)
+    #[command(alias = "rm")]
+    Remove(RemoveArgs),
 }
 
 /// Execute a package manager command
@@ -63,5 +84,9 @@ pub async fn execute(command: PmCommands) -> Result<i32> {
         PmCommands::WhyNot(args) => why::execute(args, true).await,
         PmCommands::Show(args) => show::execute(args).await,
         PmCommands::Search(args) => search::execute(args).await,
+        PmCommands::Install(args) => crate::install::execute(args).await,
+        PmCommands::Update(args) => crate::update::execute(args).await,
+        PmCommands::Add(args) => crate::add::execute(args).await,
+        PmCommands::Remove(args) => crate::remove::execute(args).await,
     }
 }
