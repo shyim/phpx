@@ -8,6 +8,7 @@ pub mod run;
 pub mod platform;
 mod why;
 mod show;
+mod search;
 
 use clap::Subcommand;
 use anyhow::Result;
@@ -19,6 +20,7 @@ pub use clear_cache::ClearCacheArgs;
 pub use run::RunArgs;
 pub use why::WhyArgs;
 pub use show::ShowArgs;
+pub use search::SearchArgs;
 
 /// Package manager subcommands
 #[derive(Subcommand, Debug)]
@@ -45,6 +47,9 @@ pub enum PmCommands {
 
     #[command(alias = "info")]
     Show(ShowArgs),
+
+    /// Search for packages
+    Search(SearchArgs),
 }
 
 /// Execute a package manager command
@@ -57,5 +62,6 @@ pub async fn execute(command: PmCommands) -> Result<i32> {
         PmCommands::Why(args) => why::execute(args, false).await,
         PmCommands::WhyNot(args) => why::execute(args, true).await,
         PmCommands::Show(args) => show::execute(args).await,
+        PmCommands::Search(args) => search::execute(args).await,
     }
 }
