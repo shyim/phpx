@@ -20,6 +20,10 @@ pub use run::RunArgs;
 pub use why::WhyArgs;
 pub use show::ShowArgs;
 
+// Re-export install and update args for pm subcommands
+pub use crate::install::InstallArgs;
+pub use crate::update::UpdateArgs;
+
 /// Package manager subcommands
 #[derive(Subcommand, Debug)]
 pub enum PmCommands {
@@ -45,6 +49,13 @@ pub enum PmCommands {
 
     #[command(alias = "info")]
     Show(ShowArgs),
+
+    /// Install project dependencies from composer.lock (alias for top-level install)
+    #[command(alias = "i")]
+    Install(InstallArgs),
+
+    /// Update dependencies to their latest versions (alias for top-level update)
+    Update(UpdateArgs),
 }
 
 /// Execute a package manager command
@@ -57,5 +68,7 @@ pub async fn execute(command: PmCommands) -> Result<i32> {
         PmCommands::Why(args) => why::execute(args, false).await,
         PmCommands::WhyNot(args) => why::execute(args, true).await,
         PmCommands::Show(args) => show::execute(args).await,
+        PmCommands::Install(args) => crate::install::execute(args).await,
+        PmCommands::Update(args) => crate::update::execute(args).await,
     }
 }
