@@ -107,7 +107,6 @@ pub struct UpdateArgs {
 }
 
 pub async fn execute(args: UpdateArgs) -> Result<i32> {
-    // Check COMPOSER_NO_AUDIT environment variable
     let skip_audit = args.no_audit || std::env::var("COMPOSER_NO_AUDIT").unwrap_or_default() == "1";
 
     // Initialize logger based on verbosity level
@@ -197,7 +196,6 @@ pub async fn execute(args: UpdateArgs) -> Result<i32> {
         update_packages,
     ).await;
 
-    // Run audit after successful update unless --no-audit is specified
     if result.is_ok() && !skip_audit {
         let audit_args = crate::pm::audit::AuditArgs {
             no_dev: args.no_dev,

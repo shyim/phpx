@@ -95,7 +95,6 @@ pub struct InstallArgs {
 use crate::pm::platform::PlatformInfo;
 
 pub async fn execute(args: InstallArgs) -> Result<i32> {
-    // Check COMPOSER_NO_AUDIT environment variable
     let skip_audit = args.no_audit || std::env::var("COMPOSER_NO_AUDIT").unwrap_or_default() == "1";
 
     let working_dir = args.working_dir.canonicalize()
@@ -166,7 +165,6 @@ pub async fn execute(args: InstallArgs) -> Result<i32> {
         ).await
     };
 
-    // Run audit after successful install unless --no-audit is specified
     if result.is_ok() && !skip_audit {
         let audit_args = crate::pm::audit::AuditArgs {
             no_dev: args.no_dev,

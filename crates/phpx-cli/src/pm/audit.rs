@@ -4,8 +4,11 @@ use colored::Colorize;
 use phpx_pm::json::{ComposerLock, LockedPackage};
 use phpx_pm::cache::Cache;
 use phpx_pm::config::Config;
+use phpx_semver::VersionParser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -35,12 +38,6 @@ pub struct AuditArgs {
 #[derive(Debug, Serialize, Deserialize)]
 struct SecurityAdvisoriesResponse {
     advisories: HashMap<String, Vec<SecurityAdvisory>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedPackageAdvisories {
-    advisories: Vec<SecurityAdvisory>,
-    cached_at: u64, // Unix timestamp
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -79,7 +76,6 @@ pub async fn execute(args: AuditArgs) -> Result<i32> {
         .canonicalize()
         .context("Failed to resolve working directory")?;
 
-    // Load composer.lock
     let lock_path = working_dir.join("composer.lock");
     let lock: ComposerLock = if lock_path.exists() {
         let content = std::fs::read_to_string(&lock_path)?;
@@ -89,147 +85,114 @@ pub async fn execute(args: AuditArgs) -> Result<i32> {
         return Err(anyhow::anyhow!("No composer.lock found. Run 'install' or 'update' first."));
     };
 
-    // Get packages to audit
-    let packages: Vec<String> = if args.no_dev {
-        lock.packages.iter().map(|p| p.name.clone()).collect()
+    let packages_with_versions: HashMap<String, String> = if args.no_dev {
+        lock.packages
+            .iter()
+            .map(|p| (p.name.clone(), p.version.clone()))
+            .collect()
     } else {
         lock.packages
             .iter()
             .chain(lock.packages_dev.iter())
-            .map(|p| p.name.clone())
+            .map(|p| (p.name.clone(), p.version.clone()))
             .collect()
     };
+
+    let packages: Vec<String> = packages_with_versions.keys().cloned().collect();
 
     if packages.is_empty() {
         println!("{}", "No packages - skipping audit.".yellow());
         return Ok(0);
     }
 
-    // Load config to get cache directory
+    let version_parser = VersionParser::new();
+
     let config = Config::build(Some(&working_dir), true)?;
     let cache_dir = config.cache_dir
         .context("Cache directory not configured")?
         .join("audit");
     let cache = Cache::new(cache_dir);
 
-    // Cache TTL: 10 minutes
     let cache_ttl = Duration::from_secs(10 * 60);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
 
-    // Check which packages have valid cache and which need fresh data
-    let mut cached_advisories: HashMap<String, Vec<SecurityAdvisory>> = HashMap::new();
-    let mut packages_to_fetch: Vec<String> = Vec::new();
+    // Create a hash of all package names to use as a single cache key
+    let mut sorted_packages = packages.clone();
+    sorted_packages.sort();
+    let mut hasher = DefaultHasher::new();
+    sorted_packages.hash(&mut hasher);
+    let cache_key = format!("bulk-{:x}", hasher.finish());
 
-    for package in &packages {
-        let cache_key = format!("advisory/{}", package.replace('/', "-"));
-
-        // Check if cache exists and is fresh
+    // Try to read from cache first
+    let all_advisories: HashMap<String, Vec<SecurityAdvisory>> =
         if let Ok(Some(age)) = cache.age(&cache_key) {
             if age < cache_ttl {
-                // Cache is fresh, try to load it
                 if let Ok(Some(data)) = cache.read(&cache_key) {
-                    if let Ok(cached) = serde_json::from_slice::<CachedPackageAdvisories>(&data) {
-                        if !cached.advisories.is_empty() {
-                            cached_advisories.insert(package.clone(), cached.advisories);
-                            continue;
-                        }
+                    if let Ok(cached) = serde_json::from_slice::<SecurityAdvisoriesResponse>(&data) {
+                        cached.advisories
+                    } else {
+                        fetch_and_cache_advisories(&cache, &cache_key, &packages).await?
                     }
+                } else {
+                    fetch_and_cache_advisories(&cache, &cache_key, &packages).await?
                 }
+            } else {
+                fetch_and_cache_advisories(&cache, &cache_key, &packages).await?
             }
+        } else {
+            fetch_and_cache_advisories(&cache, &cache_key, &packages).await?
+        };
+
+    let mut filtered_advisories: HashMap<String, Vec<SecurityAdvisory>> = HashMap::new();
+
+    for (package_name, advisories) in all_advisories {
+        if !packages.contains(&package_name) {
+            continue;
         }
 
-        // No valid cache, need to fetch
-        packages_to_fetch.push(package.clone());
-    }
+        let installed_version = match packages_with_versions.get(&package_name) {
+            Some(v) => v,
+            None => continue,
+        };
 
-    // Fetch fresh data for packages not in cache
-    let mut fresh_advisories: HashMap<String, Vec<SecurityAdvisory>> = HashMap::new();
+        let normalized_version = match version_parser.normalize(installed_version) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
 
-    if !packages_to_fetch.is_empty() {
-        let api_url = "https://packagist.org/api/security-advisories/";
-
-        let form_data = packages_to_fetch
-            .iter()
-            .map(|p| format!("packages[]={}", p))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let client = reqwest::Client::new();
-        let response = client
-            .post(api_url)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(form_data)
-            .send()
-            .await
-            .context("Failed to query security advisories API")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Security advisories API returned status: {}",
-                response.status()
-            ));
-        }
-
-        let api_response: SecurityAdvisoriesResponse = response
-            .json()
-            .await
-            .context("Failed to parse security advisories response")?;
-
-        fresh_advisories = api_response.advisories;
-
-        // Cache the fresh data
-        for package in &packages_to_fetch {
-            let cache_key = format!("advisory/{}", package.replace('/', "-"));
-            let advisories = fresh_advisories.get(package).cloned().unwrap_or_default();
-
-            let cached = CachedPackageAdvisories {
-                advisories,
-                cached_at: now,
-            };
-
-            if let Ok(data) = serde_json::to_vec(&cached) {
-                let _ = cache.write(&cache_key, &data);
-            }
-        }
-    }
-
-    // Merge cached and fresh advisories
-    let mut all_advisories = cached_advisories;
-    for (package, advisories) in fresh_advisories {
-        all_advisories.insert(package, advisories);
-    }
-
-    // Filter to only include packages we're checking
-    let advisories_response = SecurityAdvisoriesResponse {
-        advisories: all_advisories
+        let matching_advisories: Vec<SecurityAdvisory> = advisories
             .into_iter()
-            .filter(|(k, v)| packages.contains(k) && !v.is_empty())
-            .collect(),
+            .filter(|advisory| {
+                match version_parser.parse_constraints_cached(&advisory.affected_versions) {
+                    Ok(constraint) => constraint.matches_normalized(&normalized_version),
+                    Err(_) => false,
+                }
+            })
+            .collect();
+
+        if !matching_advisories.is_empty() {
+            filtered_advisories.insert(package_name, matching_advisories);
+        }
+    }
+
+    let advisories_response = SecurityAdvisoriesResponse {
+        advisories: filtered_advisories,
     };
 
-    // Check for abandoned packages
-    let abandoned_packages: Vec<_> = if let Some(abandoned_behavior) = &args.abandoned {
-        if abandoned_behavior != "ignore" {
-            lock.packages
-                .iter()
-                .chain(if args.no_dev {
-                    [].iter()
-                } else {
-                    lock.packages_dev.iter()
-                })
-                .filter(|p| p.is_abandoned())
-                .collect()
-        } else {
-            Vec::new()
-        }
+    let abandoned_behavior = args.abandoned.as_deref().unwrap_or("fail");
+    let abandoned_packages: Vec<_> = if abandoned_behavior != "ignore" {
+        lock.packages
+            .iter()
+            .chain(if args.no_dev {
+                [].iter()
+            } else {
+                lock.packages_dev.iter()
+            })
+            .filter(|p| p.is_abandoned())
+            .collect()
     } else {
         Vec::new()
     };
 
-    // Display results
     let has_vulnerabilities = !advisories_response.advisories.is_empty();
     let has_abandoned = !abandoned_packages.is_empty();
 
@@ -249,13 +212,12 @@ pub async fn execute(args: AuditArgs) -> Result<i32> {
         }
     }
 
-    // Return exit code
     let mut exit_code = 0;
     if has_vulnerabilities {
-        exit_code |= 1; // STATUS_VULNERABLE
+        exit_code |= 1;
     }
-    if has_abandoned && args.abandoned == Some("fail".to_string()) {
-        exit_code |= 2; // STATUS_ABANDONED
+    if has_abandoned && abandoned_behavior == "fail" {
+        exit_code |= 2;
     }
 
     Ok(exit_code)
@@ -283,6 +245,47 @@ fn output_json(
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+async fn fetch_and_cache_advisories(
+    cache: &Cache,
+    cache_key: &str,
+    packages: &[String],
+) -> Result<HashMap<String, Vec<SecurityAdvisory>>> {
+    let api_url = "https://packagist.org/api/security-advisories/";
+
+    let form_data = packages
+        .iter()
+        .map(|p| format!("packages[]={}", p))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(api_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form_data)
+        .send()
+        .await
+        .context("Failed to query security advisories API")?;
+
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!(
+            "Security advisories API returned status: {}",
+            response.status()
+        ));
+    }
+
+    let api_response: SecurityAdvisoriesResponse = response
+        .json()
+        .await
+        .context("Failed to parse security advisories response")?;
+
+    if let Ok(data) = serde_json::to_vec(&api_response) {
+        let _ = cache.write(cache_key, &data);
+    }
+
+    Ok(api_response.advisories)
 }
 
 fn output_table(
