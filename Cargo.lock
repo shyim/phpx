@@ -1859,6 +1859,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "terminal_size",
  "tiny_http",
  "tokio",

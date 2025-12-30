@@ -238,6 +238,17 @@ fn default_type() -> String {
     "library".to_string()
 }
 
+fn parse_license_value(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        serde_json::Value::String(s) => vec![s.clone()],
+        _ => vec![],
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InstalledSource {
     #[serde(rename = "type")]
@@ -288,8 +299,8 @@ impl Package {
         pkg.replace = data.replace.clone();
         pkg.provide = data.provide.clone();
         pkg.description = data.description.clone();
+        pkg.license = parse_license_value(&data.license);
 
-        // Replace self.version constraints with actual version
         pkg.replace_self_version();
 
         pkg

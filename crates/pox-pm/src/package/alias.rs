@@ -395,13 +395,25 @@ pub fn parse_branch_aliases(
                 continue;
             }
 
-            (normalized, target_branch.to_string())
+            let pretty = normalize_pretty_dev_version(target_branch);
+            (normalized, pretty)
         };
 
         aliases.insert(source_normalized, (alias_normalized, alias_pretty));
     }
 
     aliases
+}
+
+fn normalize_pretty_dev_version(version: &str) -> String {
+    if let Some(without_dev) = version.strip_suffix("-dev") {
+        if without_dev.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            if !without_dev.ends_with(".x") {
+                return format!("{}.x-dev", without_dev);
+            }
+        }
+    }
+    version.to_string()
 }
 
 /// Normalizes a branch name to a version
@@ -582,5 +594,48 @@ mod tests {
         let extra = serde_json::json!({});
         let aliases = parse_branch_aliases(Some(&extra));
         assert!(aliases.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_pretty_dev_version() {
+        assert_eq!(normalize_pretty_dev_version("2.9-dev"), "2.9.x-dev");
+        assert_eq!(normalize_pretty_dev_version("1.0-dev"), "1.0.x-dev");
+        assert_eq!(normalize_pretty_dev_version("10.5-dev"), "10.5.x-dev");
+        assert_eq!(normalize_pretty_dev_version("2.9.x-dev"), "2.9.x-dev");
+        assert_eq!(normalize_pretty_dev_version("1.0.x-dev"), "1.0.x-dev");
+        assert_eq!(normalize_pretty_dev_version("dev-main"), "dev-main");
+        assert_eq!(normalize_pretty_dev_version("dev-feature"), "dev-feature");
+        assert_eq!(normalize_pretty_dev_version("2.9"), "2.9");
+        assert_eq!(normalize_pretty_dev_version("1.0.0"), "1.0.0");
+    }
+
+    #[test]
+    fn test_parse_branch_aliases_normalizes_pretty_version() {
+        let extra = serde_json::json!({
+            "branch-alias": {
+                "dev-main": "2.9-dev"
+            }
+        });
+
+        let aliases = parse_branch_aliases(Some(&extra));
+        assert!(!aliases.is_empty());
+
+        let (normalized, pretty) = aliases.get("dev-main").unwrap();
+        assert_eq!(normalized, "2.9.x-dev");
+        assert_eq!(pretty, "2.9.x-dev");
+    }
+
+    #[test]
+    fn test_parse_branch_aliases_already_normalized() {
+        let extra = serde_json::json!({
+            "branch-alias": {
+                "dev-main": "2.9.x-dev"
+            }
+        });
+
+        let aliases = parse_branch_aliases(Some(&extra));
+        let (normalized, pretty) = aliases.get("dev-main").unwrap();
+        assert_eq!(normalized, "2.9.x-dev");
+        assert_eq!(pretty, "2.9.x-dev");
     }
 }

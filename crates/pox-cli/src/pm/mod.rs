@@ -11,6 +11,7 @@ mod show;
 mod search;
 mod outdated;
 pub mod audit;
+mod licenses;
 
 use clap::Subcommand;
 use anyhow::Result;
@@ -25,6 +26,7 @@ pub use show::ShowArgs;
 pub use search::SearchArgs;
 pub use outdated::OutdatedArgs;
 pub use audit::AuditArgs;
+pub use licenses::LicensesArgs;
 
 // Re-export args for pm subcommand aliases
 pub use crate::install::InstallArgs;
@@ -67,6 +69,9 @@ pub enum PmCommands {
     /// Check for security vulnerabilities in dependencies
     Audit(AuditArgs),
 
+    /// Shows information about licenses of dependencies
+    Licenses(LicensesArgs),
+
     /// Install project dependencies from composer.lock (alias for top-level install)
     #[command(alias = "i")]
     Install(InstallArgs),
@@ -96,6 +101,7 @@ pub async fn execute(command: PmCommands) -> Result<i32> {
         PmCommands::Search(args) => search::execute(args).await,
         PmCommands::Outdated(args) => outdated::execute(args).await,
         PmCommands::Audit(args) => audit::execute(args).await,
+        PmCommands::Licenses(args) => licenses::execute(args).await,
         PmCommands::Install(args) => crate::install::execute(args).await,
         PmCommands::Update(args) => crate::update::execute(args).await,
         PmCommands::Add(args) => crate::add::execute(args).await,

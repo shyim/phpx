@@ -6,6 +6,7 @@ mod installed;
 mod path;
 mod package;
 mod artifact;
+mod utils;
 pub mod vcs;
 
 pub use traits::*;
@@ -16,4 +17,5 @@ pub use installed::*;
 pub use path::*;
 pub use package::*;
 pub use artifact::*;
+pub use utils::*;
 pub use vcs::{VcsRepository, VcsType, GitDriver, GitHubDriver, GitLabDriver, BitbucketDriver, get_head_commit};
