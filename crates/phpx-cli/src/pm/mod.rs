@@ -9,6 +9,7 @@ pub mod platform;
 mod why;
 mod show;
 mod search;
+mod outdated;
 
 use clap::Subcommand;
 use anyhow::Result;
@@ -21,6 +22,7 @@ pub use run::RunArgs;
 pub use why::WhyArgs;
 pub use show::ShowArgs;
 pub use search::SearchArgs;
+pub use outdated::OutdatedArgs;
 
 // Re-export args for pm subcommand aliases
 pub use crate::install::InstallArgs;
@@ -57,6 +59,9 @@ pub enum PmCommands {
     /// Search for packages
     Search(SearchArgs),
 
+    /// Shows a list of installed packages that have updates available
+    Outdated(OutdatedArgs),
+
     /// Install project dependencies from composer.lock (alias for top-level install)
     #[command(alias = "i")]
     Install(InstallArgs),
@@ -84,6 +89,7 @@ pub async fn execute(command: PmCommands) -> Result<i32> {
         PmCommands::WhyNot(args) => why::execute(args, true).await,
         PmCommands::Show(args) => show::execute(args).await,
         PmCommands::Search(args) => search::execute(args).await,
+        PmCommands::Outdated(args) => outdated::execute(args).await,
         PmCommands::Install(args) => crate::install::execute(args).await,
         PmCommands::Update(args) => crate::update::execute(args).await,
         PmCommands::Add(args) => crate::add::execute(args).await,
