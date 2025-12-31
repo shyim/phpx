@@ -10,7 +10,9 @@
 mod composer_bin;
 mod phpstan_extension_installer;
 mod registry;
+mod symfony_flex;
 mod symfony_runtime;
 
 pub use composer_bin::BinConfig;
 pub use registry::register_plugins;
+pub use symfony_flex::{FlexConfig, FlexLock};
