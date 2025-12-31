@@ -65,12 +65,15 @@ pub enum PmCommands {
     #[command(name = "clear-cache", alias = "clearcache")]
     ClearCache(ClearCacheArgs),
 
+    /// Shows which packages cause the given package to be installed
     #[command(alias = "depends")]
     Why(WhyArgs),
 
+    /// Shows which packages prevent the given package from being installed
     #[command(name = "why-not", alias = "prohibits")]
     WhyNot(WhyArgs),
 
+    /// Shows information about packages
     #[command(alias = "info")]
     Show(ShowArgs),
 
