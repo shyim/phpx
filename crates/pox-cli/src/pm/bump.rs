@@ -8,7 +8,7 @@ use regex::Regex;
 use std::path::PathBuf;
 
 use pox_pm::json::{ComposerJson, ComposerLock};
-use pox_pm::compute_content_hash;
+use pox_pm::{compute_content_hash, is_platform_package};
 
 #[derive(Args, Debug)]
 pub struct BumpArgs {
@@ -31,18 +31,6 @@ pub struct BumpArgs {
     /// Working directory
     #[arg(short = 'd', long, default_value = ".")]
     pub working_dir: PathBuf,
-}
-
-/// Checks if a package name is a platform package (php, ext-*, lib-*, composer-*)
-fn is_platform_package(name: &str) -> bool {
-    let name_lower = name.to_lowercase();
-    name_lower == "php"
-        || name_lower.starts_with("ext-")
-        || name_lower.starts_with("lib-")
-        || name_lower.starts_with("composer-")
-        || name_lower == "composer"
-        || name_lower == "composer-runtime-api"
-        || name_lower == "composer-plugin-api"
 }
 
 /// Bump a version constraint to match the installed version.
@@ -762,19 +750,6 @@ mod tests {
     #[test]
     fn test_bump_skip_unstable() {
         assert_eq!(bump_requirement("~2", "2.1-beta.1"), "~2");
-    }
-
-    #[test]
-    fn test_is_platform_package() {
-        assert!(is_platform_package("php"));
-        assert!(is_platform_package("PHP"));
-        assert!(is_platform_package("ext-json"));
-        assert!(is_platform_package("ext-mbstring"));
-        assert!(is_platform_package("lib-openssl"));
-        assert!(is_platform_package("composer-plugin-api"));
-        assert!(is_platform_package("composer-runtime-api"));
-        assert!(!is_platform_package("vendor/package"));
-        assert!(!is_platform_package("symfony/console"));
     }
 
     #[test]
