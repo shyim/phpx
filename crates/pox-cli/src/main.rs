@@ -1,5 +1,6 @@
 mod add;
 mod config;
+mod create_project;
 mod pm;
 mod init;
 mod install;
@@ -95,6 +96,9 @@ enum Commands {
 
     /// Create a new composer.json in current directory
     Init(init::InitArgs),
+
+    /// Create a new project from a package into a directory
+    CreateProject(create_project::CreateProjectArgs),
 
     /// Install project dependencies from composer.lock
     Install(install::InstallArgs),
@@ -653,6 +657,11 @@ fn run() -> Result<i32> {
                 let rt = tokio::runtime::Runtime::new()
                     .map_err(|e| anyhow::anyhow!("Failed to create async runtime: {}", e))?;
                 return rt.block_on(init::execute(init_args));
+            }
+            Commands::CreateProject(create_project_args) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| anyhow::anyhow!("Failed to create async runtime: {}", e))?;
+                return rt.block_on(create_project::execute(create_project_args));
             }
             Commands::Install(install_args) => {
                 let rt = tokio::runtime::Runtime::new()

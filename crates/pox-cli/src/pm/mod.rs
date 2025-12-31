@@ -43,6 +43,7 @@ pub use crate::install::InstallArgs;
 pub use crate::update::UpdateArgs;
 pub use crate::add::AddArgs;
 pub use crate::remove::RemoveArgs;
+pub use crate::create_project::CreateProjectArgs;
 
 /// Package manager subcommands
 #[derive(Subcommand, Debug)]
@@ -113,6 +114,9 @@ pub enum PmCommands {
     /// Remove a package from the project (alias for top-level remove)
     #[command(alias = "rm")]
     Remove(RemoveArgs),
+
+    /// Create a new project from a package into a directory
+    CreateProject(CreateProjectArgs),
 }
 
 /// Execute a package manager command
@@ -138,5 +142,6 @@ pub async fn execute(command: PmCommands) -> Result<i32> {
         PmCommands::Update(args) => crate::update::execute(args).await,
         PmCommands::Add(args) => crate::add::execute(args).await,
         PmCommands::Remove(args) => crate::remove::execute(args).await,
+        PmCommands::CreateProject(args) => crate::create_project::execute(args).await,
     }
 }
