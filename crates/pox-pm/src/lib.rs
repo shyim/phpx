@@ -32,5 +32,5 @@ pub use event::{
     PostAutoloadDumpEvent, PostInstallEvent, PostUpdateEvent,
     PreAutoloadDumpEvent, PreInstallEvent, PreUpdateEvent,
 };
-pub use util::is_platform_package;
+pub use util::{is_platform_package, compute_content_hash};
 #[cfg(test)] mod test_content_hash;

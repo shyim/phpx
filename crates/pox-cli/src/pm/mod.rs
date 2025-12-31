@@ -1,6 +1,7 @@
 //! Package manager subcommands.
 
 pub mod bin;
+mod bump;
 mod exec;
 mod dump_autoload;
 mod clear_cache;
@@ -20,6 +21,7 @@ use clap::Subcommand;
 use anyhow::Result;
 
 pub use bin::BinArgs;
+pub use bump::BumpArgs;
 pub use exec::ExecArgs;
 pub use dump_autoload::DumpAutoloadArgs;
 pub use clear_cache::ClearCacheArgs;
@@ -45,6 +47,9 @@ pub use crate::remove::RemoveArgs;
 pub enum PmCommands {
     /// Run a command in a bin namespace (vendor-bin plugin)
     Bin(BinArgs),
+
+    /// Increases the lower limit of your composer.json requirements to the currently installed versions
+    Bump(BumpArgs),
 
     /// Execute a vendored binary/script
     Exec(ExecArgs),
@@ -109,6 +114,7 @@ pub enum PmCommands {
 pub async fn execute(command: PmCommands) -> Result<i32> {
     match command {
         PmCommands::Bin(args) => bin::execute(args).await,
+        PmCommands::Bump(args) => bump::execute(args).await,
         PmCommands::Exec(args) => exec::execute(args).await,
         PmCommands::DumpAutoload(args) => dump_autoload::execute(args).await,
         PmCommands::ClearCache(args) => clear_cache::execute(args).await,
