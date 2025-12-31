@@ -1,7 +1,10 @@
 use std::fmt;
 
+use pox_semver::VersionParser;
+
 use super::pool::{Pool, PackageId};
 use super::rule::{Rule, RuleType};
+use crate::util::is_platform_package;
 
 /// A problem encountered during dependency resolution.
 ///
@@ -109,23 +112,134 @@ fn get_source_name(rule: &ProblemRule, pool: &Pool) -> String {
     })
 }
 
+/// Check if a version satisfies a constraint
+fn version_satisfies(version: &str, constraint: &str) -> bool {
+    let parser = VersionParser::new();
+    if let Ok(parsed) = parser.parse_constraints_cached(constraint) {
+        parsed.satisfies(version)
+    } else {
+        false
+    }
+}
+
 /// Describe a problem rule in human-readable form
 fn describe_rule(pool: &Pool, rule: &ProblemRule) -> String {
     match rule.rule_type {
         RuleType::RootRequire => {
             let target = rule.target.as_deref().unwrap_or("unknown");
             let constraint = rule.constraint.as_deref().unwrap_or("*");
-            // Check if any packages exist for this requirement
-            let has_packages = !pool.packages_by_name(target).is_empty();
-            if has_packages {
+            let packages = pool.packages_by_name(target);
+
+            if packages.is_empty() {
+                return format!(
+                    "Root composer.json requires {} {}, but no matching package was found",
+                    target, constraint
+                );
+            }
+
+            let mut reasons = Vec::new();
+            for &pkg_id in &packages {
+                if let Some(pkg) = pool.package(pkg_id) {
+                    let version = pkg.pretty_version.as_deref().unwrap_or(&pkg.version);
+
+                    if let Some(php_req) = pkg.require.get("php") {
+                        let php_packages = pool.packages_by_name("php");
+                        if let Some(&php_id) = php_packages.first() {
+                            if let Some(php_pkg) = pool.package(php_id) {
+                                let php_version = php_pkg.pretty_version.as_deref().unwrap_or(&php_pkg.version);
+                                if !version_satisfies(php_version, php_req) {
+                                    reasons.push(format!(
+                                        "{} {} requires php {} -> your php version ({}) does not satisfy that requirement",
+                                        target, version, php_req, php_version
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    for (dep_name, dep_constraint) in &pkg.require {
+                        if dep_name.starts_with("ext-") {
+                            let ext_packages = pool.packages_by_name(dep_name);
+                            if ext_packages.is_empty() {
+                                reasons.push(format!(
+                                    "{} {} requires PHP extension {} {} -> it is missing from your system",
+                                    target, version, dep_name, dep_constraint
+                                ));
+                            } else if let Some(&ext_id) = ext_packages.first() {
+                                if let Some(ext_pkg) = pool.package(ext_id) {
+                                    let ext_version = ext_pkg.pretty_version.as_deref().unwrap_or(&ext_pkg.version);
+                                    if !version_satisfies(ext_version, dep_constraint) {
+                                        reasons.push(format!(
+                                            "{} {} requires {} {} -> installed version is {}",
+                                            target, version, dep_name, dep_constraint, ext_version
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    for (dep_name, dep_constraint) in &pkg.require {
+                        if is_platform_package(dep_name) {
+                            continue;
+                        }
+                        let providers = pool.what_provides(dep_name, Some(dep_constraint));
+                        if providers.is_empty() {
+                            let available = pool.packages_by_name(dep_name);
+                            if available.is_empty() {
+                                reasons.push(format!(
+                                    "{} {} requires {} {} -> no matching package found",
+                                    target, version, dep_name, dep_constraint
+                                ));
+                            } else {
+                                let available_versions: Vec<_> = available.iter()
+                                    .filter_map(|&id| pool.package(id))
+                                    .map(|p| p.pretty_version.as_deref().unwrap_or(&p.version).to_string())
+                                    .take(3)
+                                    .collect();
+                                reasons.push(format!(
+                                    "{} {} requires {} {} -> found {}[{}] but it does not match the constraint",
+                                    target, version, dep_name, dep_constraint, dep_name, available_versions.join(", ")
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if reasons.is_empty() {
                 format!(
                     "Root composer.json requires {} {}, but no version satisfying the constraint can be installed",
                     target, constraint
                 )
             } else {
+                reasons.sort();
+                reasons.dedup();
+
+                let (php_reasons, other): (Vec<_>, Vec<_>) = reasons
+                    .into_iter()
+                    .partition(|r| r.contains("your php version"));
+                let (ext_reasons, pkg_reasons): (Vec<_>, Vec<_>) = other
+                    .into_iter()
+                    .partition(|r| r.contains("ext-"));
+
+                let mut sorted_reasons = php_reasons;
+                sorted_reasons.extend(ext_reasons.into_iter().take(3));
+                sorted_reasons.extend(pkg_reasons.into_iter().take(3));
+
+                let limited: Vec<_> = sorted_reasons.into_iter().take(5).collect();
                 format!(
-                    "Root composer.json requires {} {}, but no matching package was found",
-                    target, constraint
+                    "Root composer.json requires {} {} -> satisfiable by {}[{}].\n    {}",
+                    target,
+                    constraint,
+                    target,
+                    packages.iter()
+                        .filter_map(|&id| pool.package(id))
+                        .map(|p| p.pretty_version.as_deref().unwrap_or(&p.version).to_string())
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    limited.join("\n    ")
                 )
             }
         }
@@ -137,7 +251,26 @@ fn describe_rule(pool: &Pool, rule: &ProblemRule) -> String {
             let source = get_source_name(rule, pool);
             let target = rule.target.as_deref().unwrap_or("unknown");
             let constraint = rule.constraint.as_deref().unwrap_or("*");
-            format!("{} requires {} {}", source, target, constraint)
+
+            let target_packages = pool.packages_by_name(target);
+            if target_packages.is_empty() {
+                format!("{} requires {} {} -> no matching package found", source, target, constraint)
+            } else {
+                let providers = pool.what_provides(target, Some(constraint));
+                if providers.is_empty() {
+                    let available: Vec<_> = target_packages.iter()
+                        .filter_map(|&id| pool.package(id))
+                        .map(|p| p.pretty_version.as_deref().unwrap_or(&p.version).to_string())
+                        .take(5)
+                        .collect();
+                    format!(
+                        "{} requires {} {} -> found {}[{}] but it does not match the constraint",
+                        source, target, constraint, target, available.join(", ")
+                    )
+                } else {
+                    format!("{} requires {} {}", source, target, constraint)
+                }
+            }
         }
         RuleType::PackageConflict => {
             let source = get_source_name(rule, pool);
