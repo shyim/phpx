@@ -55,10 +55,14 @@ impl EventListener for SymfonyFlexPlugin {
         }
 
         // Run the flex plugin
-        let rt = tokio::runtime::Handle::try_current()
+        // We may already be inside an async runtime, so we need to use block_in_place
+        // to safely block within the runtime context
+        let result = tokio::runtime::Handle::try_current()
             .map(|h| {
-                // Already in async context, use it
-                h.block_on(self.run_flex(composer, &e.packages))
+                // Already in async context - use block_in_place to safely block
+                tokio::task::block_in_place(|| {
+                    h.block_on(self.run_flex(composer, &e.packages))
+                })
             })
             .unwrap_or_else(|_| {
                 // Not in async context, create a new runtime
@@ -66,7 +70,7 @@ impl EventListener for SymfonyFlexPlugin {
                 rt.block_on(self.run_flex(composer, &e.packages))
             });
 
-        rt?;
+        result?;
         Ok(0)
     }
 
